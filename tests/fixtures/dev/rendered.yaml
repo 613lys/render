@@ -1,0 +1,78 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: platform-charts
+  namespace: flux-system
+spec:
+  interval: 10m
+  url: https://artifactory.example.com/artifactory/helm
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: common-values
+  namespace: app-dev
+data:
+  values.yaml: |
+    replicaCount: 2
+    appConfig:
+      environment: common
+      logLevel: info
+      shared: from-common
+      endpoint: https://common.example.test
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: environment-values
+  namespace: app-dev
+data:
+  values.yaml: |
+    replicaCount: 3
+    appConfig:
+      environment: dev
+      endpoint: https://dev.example.test
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: secret-values
+  namespace: app-dev
+type: Opaque
+stringData:
+  values.yaml: |
+    appConfig:
+      token: dev-token
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: demo
+  namespace: app-dev
+spec:
+  interval: 10m
+  releaseName: demo-dev
+  targetNamespace: workload-dev
+  chart:
+    spec:
+      chart: demo-app
+      version: 1.2.3
+      sourceRef:
+        kind: HelmRepository
+        name: platform-charts
+        namespace: flux-system
+  valuesFrom:
+    - kind: ConfigMap
+      name: common-values
+    - kind: ConfigMap
+      name: environment-values
+    - kind: Secret
+      name: secret-values
+    - kind: ConfigMap
+      name: deliberately-missing
+      optional: true
+  values:
+    replicaCount: 4
+    appConfig:
+      logLevel: debug
+      inlineOnly: dev-inline

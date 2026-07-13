@@ -1,0 +1,57 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: platform-charts
+  namespace: flux-system
+spec:
+  interval: 10m
+  url: https://artifactory.example.com/artifactory/helm
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: common-values
+  namespace: app-dev
+data:
+  values.yaml: |
+    replicaCount: 2
+    appConfig:
+      environment: dev
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: alpha
+  namespace: app-dev
+spec:
+  targetNamespace: workload-dev
+  chart:
+    spec:
+      chart: demo-app
+      version: 1.2.3
+      sourceRef:
+        kind: HelmRepository
+        name: platform-charts
+        namespace: flux-system
+  valuesFrom:
+    - kind: ConfigMap
+      name: common-values
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: beta
+  namespace: app-dev
+spec:
+  targetNamespace: workload-dev
+  chart:
+    spec:
+      chart: demo-app
+      version: 1.2.3
+      sourceRef:
+        kind: HelmRepository
+        name: platform-charts
+        namespace: flux-system
+  valuesFrom:
+    - kind: ConfigMap
+      name: common-values
