@@ -3,3 +3,7 @@ __pycache__/
 .pytest_cache/
 outputs/
 work/
+outputs/
+recon-data/
+recon_report.html
+__pycache__/

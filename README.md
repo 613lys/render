@@ -47,3 +47,33 @@ not contact or apply to a Kubernetes cluster.
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+## Generate a reconciliation report
+
+`generate_recon_report.py` creates a standalone light-theme HTML report from a
+`baseline`/`current` reconciliation directory:
+
+```bash
+python generate_recon_report.py \
+  --input-dir ./recon-data \
+  --output ./recon_report.html
+```
+
+The report includes:
+
+- release diffs aligned by Kubernetes `kind` and normalized `metadata.name`;
+- environment diffs for Helm workloads and GitOps namespace resources;
+- semantic, order-independent App Config field comparison;
+- numeric and descriptive versions such as `2.4.0` and `current-code`;
+- environment-, version-, numeric-, short-SHA-, and SHA-256-aware name matching.
+
+To build a complete demonstration dataset before generating the report:
+
+```bash
+python create_mock_data.py
+python generate_recon_report.py \
+  --input-dir outputs/recon-data \
+  --output outputs/recon_report.html
+```
+
+Generated mock data and reports are local artifacts and should not be committed.
