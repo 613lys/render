@@ -524,7 +524,7 @@ def build(input_dir: Path):
     current = {k: scan(input_dir, "current", k) for k in ("helm", "app_config", "ns")}
     baseline = {k: scan(input_dir, "baseline", k) for k in ("helm", "app_config", "ns")}
     modules = sorted({x["module"] for x in current["app_config"] + baseline["app_config"]})
-    cards, nav = [], []
+    cards, nav = [], ['<div class="nav-heading">Modules</div>']
     for module in modules:
         cid = "module-" + re.sub(r"\W+", "-", module)
         cc = [x for x in current["app_config"] if x["module"] == module]
@@ -543,6 +543,7 @@ def build(input_dir: Path):
         cards.append(f'<section id="{cid}"><h2>Application · {html.escape(module)}</h2>'
                      f'{version_bar(ch + cc, bh + bb)}{tabs(sections)}</section>')
 
+    nav.append('<div class="nav-heading">Namespaces</div>')
     for airflow, label in ((False, "Service Namespaces"), (True, "Airflow Namespaces")):
         cn = [x for x in current["ns"] if ("ms" in x["env"].lower()) == airflow]
         bn = [x for x in baseline["ns"] if ("ms" in x["env"].lower()) == airflow]
@@ -563,6 +564,7 @@ TEMPLATE = """<!doctype html>
 header{position:sticky;top:0;z-index:5;background:#fffffff2;border-bottom:1px solid var(--line);padding:18px 22px;box-shadow:0 2px 10px #25385810}
 h1{margin:0;font-size:21px}aside{position:fixed;top:66px;bottom:0;width:220px;padding:18px;border-right:1px solid var(--line);background:#fff;overflow:auto}
 aside a{display:flex;align-items:center;justify-content:space-between;gap:7px;color:var(--muted);padding:9px;border-radius:6px;text-decoration:none;border-left:3px solid transparent}aside a:hover{background:#eaf3fb;color:#174a68}aside a.active{background:#dceef7;color:#0b5f7b;border-left-color:#087f8c;font-weight:700}.diff-badge{flex:none;padding:2px 5px;border-radius:9px;font-size:9px;font-weight:800;letter-spacing:.03em}.diff-badge.has-diff{color:#a62239;background:#ffe1e6}.diff-badge.no-diff{color:#17633d;background:#dcf5e6}
+.nav-heading{margin:14px 6px 6px;padding-bottom:6px;border-bottom:1px solid #dce5ef;color:#32445d;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.nav-heading:first-child{margin-top:0}
 main{margin-left:220px;padding:22px}main>section{display:none;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}main>section.active-view{display:block}
 h2{font-size:17px;margin:0;padding:17px 18px;border-bottom:1px solid var(--line)}
 .tabs{display:flex;gap:3px;padding:10px 12px 0;overflow:auto}.tab{border:1px solid #dce5ef;border-bottom:0;background:#edf2f8;color:var(--muted);padding:10px 12px;border-radius:7px 7px 0 0;cursor:pointer;white-space:nowrap}.tab.active{background:#fff;color:#174a68;border-top:3px solid var(--cyan)}
@@ -584,7 +586,7 @@ th small{display:block;color:var(--yellow);margin-top:5px;font-weight:400}td{bac
 .only-differences .same-row{display:none}@media(max-width:800px){aside{display:none}main{margin:0;padding:10px}}
 .only-differences .env-resource-yaml .yaml-same{display:none}
 </style></head><body><header><h1>Release & Environment Reconciliation</h1></header>
-<aside><b>Modules & Namespaces</b>__NAV__</aside><main>__CONTENT__</main>
+<aside>__NAV__</aside><main>__CONTENT__</main>
 <script>
 document.querySelectorAll('.tab-group').forEach(group=>{
  const directTabs=group.querySelectorAll(':scope > .tabs > .tab');
