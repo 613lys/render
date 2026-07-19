@@ -483,9 +483,17 @@ def resource_release_matrix(current, baseline, title, raw_env_headers=False):
 
 def tabs(sections, extra_class=""):
     buttons, bodies = [], []
-    for i, (label, body) in enumerate(sections):
+    for i, section in enumerate(sections):
+        label, body = section[0], section[1]
+        changed = section[2] if len(section) > 2 else None
         active = " active" if i == 0 else ""
-        buttons.append(f'<button class="tab{active}" data-index="{i}">{html.escape(label)}</button>')
+        badge = ""
+        if changed is not None:
+            status = "DIFF" if changed else "NO DIFF"
+            cls = "has-diff" if changed else "no-diff"
+            badge = f'<span class="tab-diff-badge {cls}">{status}</span>'
+        buttons.append(f'<button class="tab{active}" data-index="{i}">'
+                       f'{html.escape(label)}{badge}</button>')
         bodies.append(f'<div class="tab-pane{active}" data-index="{i}">{body}</div>')
     return f'<div class="tab-group {extra_class}"><div class="tabs">{"".join(buttons)}</div>{"".join(bodies)}</div>'
 
@@ -532,11 +540,12 @@ def build(input_dir: Path):
         # Mock convention: Helm chart and module share their name.
         ch = [x for x in current["helm"] if x["name"] == module]
         bh = [x for x in baseline["helm"] if x["name"] == module]
-        changed = release_changed(ch, bh, "helm") or release_changed(cc, bb, "app_config")
-        nav.append(nav_item(cid, module, changed))
+        helm_changed = release_changed(ch, bh, "helm")
+        app_changed = release_changed(cc, bb, "app_config")
+        nav.append(nav_item(cid, module, helm_changed or app_changed))
         sections = [
-            ("RELEASE-DIFF · Helm", version_bar(ch, bh) + resource_release_matrix(ch, bh, "Workload (kind / metadata.name)")),
-            ("RELEASE-DIFF · App Config", version_bar(cc, bb) + app_release_config_tabs(cc, bb)),
+            ("RELEASE-DIFF · Helm", version_bar(ch, bh) + resource_release_matrix(ch, bh, "Workload (kind / metadata.name)"), helm_changed),
+            ("RELEASE-DIFF · App Config", version_bar(cc, bb) + app_release_config_tabs(cc, bb), app_changed),
             ("ENV-DIFF · Helm", version_bar(ch, bh) + env_matrix(ch, "helm", "Workload / resource")),
             ("ENV-DIFF · App Config", version_bar(cc, bb) + app_env_config_tabs(cc)),
         ]
@@ -548,9 +557,10 @@ def build(input_dir: Path):
         cn = [x for x in current["ns"] if ("ms" in x["env"].lower()) == airflow]
         bn = [x for x in baseline["ns"] if ("ms" in x["env"].lower()) == airflow]
         cid = "airflow-ns" if airflow else "service-ns"
-        nav.append(nav_item(cid, label, release_changed(cn, bn, "ns")))
+        ns_changed = release_changed(cn, bn, "ns")
+        nav.append(nav_item(cid, label, ns_changed))
         cards.append(f'<section id="{cid}"><h2>{label}</h2>{version_bar(cn, bn)}'
-                     f'{tabs([("RELEASE-DIFF", resource_release_matrix(cn, bn, "GitOps workload (kind / metadata.name)", raw_env_headers=True)), ("ENV-DIFF", env_matrix(cn, "ns", "Namespace resource"))])}</section>')
+                     f'{tabs([("RELEASE-DIFF", resource_release_matrix(cn, bn, "GitOps workload (kind / metadata.name)", raw_env_headers=True), ns_changed), ("ENV-DIFF", env_matrix(cn, "ns", "Namespace resource"))])}</section>')
 
     data = {"nav": "".join(nav), "content": "".join(cards)}
     return TEMPLATE.replace("__NAV__", data["nav"]).replace("__CONTENT__", data["content"])
@@ -568,6 +578,7 @@ aside a{display:flex;align-items:center;justify-content:space-between;gap:7px;co
 main{position:fixed;top:56px;right:0;bottom:0;left:210px;padding:14px;overflow:hidden}main>section{display:none;height:100%;min-height:0;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}main>section.active-view{display:flex;flex-direction:column}
 h2{flex:none;font-size:15px;margin:0;padding:12px 14px;border-bottom:1px solid var(--line)}
 .tab-group{display:flex;flex:1;min-height:0;flex-direction:column}.tabs{display:flex;flex:none;gap:3px;padding:7px 9px 0;overflow-x:auto}.tab{border:1px solid #dce5ef;border-bottom:0;background:#edf2f8;color:var(--muted);padding:7px 9px;border-radius:6px 6px 0 0;cursor:pointer;white-space:nowrap;font-size:11px}.tab.active{background:#fff;color:#174a68;border-top:2px solid var(--cyan)}
+.tab-diff-badge{display:inline-block;margin-left:6px;padding:1px 4px;border-radius:8px;font-size:8px;font-weight:800}.tab-diff-badge.has-diff{color:#a62239;background:#ffe1e6}.tab-diff-badge.no-diff{color:#17633d;background:#dcf5e6}
 .tab-pane{display:none;padding:8px}.tab-pane.active{display:flex;flex:1;min-height:0;flex-direction:column;overflow:hidden}.toolbar{flex:none;padding:5px;color:var(--muted)}.table-wrap{flex:1;min-height:0;overflow:auto;max-height:none;border:1px solid var(--line);border-radius:7px}
 .config-tabs{border:1px solid #dce5ef;border-radius:8px;background:#f8fafc}.config-tabs>.tabs{padding-top:8px}.config-tabs>.tabs>.tab{font-family:Consolas,monospace;padding:8px 11px}.config-tabs>.tab-pane{padding:8px}
 table{border-collapse:separate;border-spacing:0;min-width:100%;table-layout:fixed}th,td{border-right:1px solid var(--line);border-bottom:1px solid var(--line);vertical-align:top}
