@@ -48,6 +48,11 @@ def split_stem(path: Path):
     return stem.rsplit("__", 1) if "__" in stem else (stem, "unknown")
 
 
+def filename_without_version(item):
+    base_name, _ = split_stem(item["path"])
+    return f"{base_name}{item['path'].suffix}"
+
+
 def env_info(label: str):
     low = label.lower()
     env = next((x for x in ENV_ORDER if re.search(rf"(?:^|[-_]){x}(?:$|[-_])", low)), "other")
@@ -252,7 +257,7 @@ def app_semantic_matrix(items, title):
     for env in envs:
         item = parsed[env][0]
         head.append(f'<th><b>{html.escape(env)}</b>'
-                    f'<small class="file-head">{html.escape(item["path"].name)}</small></th>')
+                    f'<small class="file-head">{html.escape(filename_without_version(item))}</small></th>')
     rows, current_category = [], None
     for path in paths:
         group = category(path)
@@ -412,7 +417,17 @@ def release_matrix(current, baseline, title, kind="generic"):
         return out
     cg, bg = group(current), group(baseline)
     logicals = sorted({k[1] for k in cg} | {k[1] for k in bg})
-    head = "".join(f"<th>{html.escape(e)}</th>" for e in envs)
+    if kind == "app_config":
+        head_cells = []
+        for env in envs:
+            item = next((x for x in current if x["env"] == env), None)
+            item = item or next((x for x in baseline if x["env"] == env), None)
+            file_name = filename_without_version(item) if item else "missing"
+            head_cells.append(f'<th><b>{html.escape(env)}</b>'
+                              f'<small class="file-head">{html.escape(file_name)}</small></th>')
+        head = "".join(head_cells)
+    else:
+        head = "".join(f"<th>{html.escape(e)}</th>" for e in envs)
     rows = []
     for logical in logicals:
         cells = []
