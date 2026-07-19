@@ -276,12 +276,12 @@ def main() -> None:
         ("cbjv-prod", "prod", "release-2026.07", 4, "1.2.9", 8080, "512Mi", False, "prod-77102"),
     ]
     modules = [
-        ("payment", 0, "2.4.0", "2.3.1"),
-        ("inventory", 10, "current-code", "1.8.4"),
-        ("notification", 20, "notification-snapshot", "notification-stable"),
-        ("risk-engine", 30, "risk-current-code", "risk-release-2026.06"),
+        ("payment", 0, "2.4.0", "2.3.1", "docker-2026.07.20", "docker-2026.06.10"),
+        ("inventory", 10, "current-code", "1.8.4", "current-code", "helm-1.8.4"),
+        ("notification", 20, "notification-snapshot", "notification-stable", "helm-3.2.1", "docker-3.2.0"),
+        ("risk-engine", 30, "risk-current-code", "risk-release-2026.06", "docker-4.7.2", "current-code"),
     ]
-    for module, port_offset, current_version, baseline_version in modules:
+    for module, port_offset, current_version, baseline_version, app_current_version, app_baseline_version in modules:
         for label, env, version, replicas, image, port, memory, feature, suffix in envs:
             module_version = current_version
             module_image = current_version
@@ -313,15 +313,15 @@ def main() -> None:
                                           server_port=8080 + port_offset, baseline=True))
             application_name = config_name_scenario(module, "application", env)
             routes_name = config_name_scenario(module, "routes", env)
-            write(f"current/app_config/{label}/{module}/database/{application_name}__{module_version}.yaml",
+            write(f"current/app_config/{label}/{module}/database/{application_name}__{app_current_version}.yaml",
                   current_app)
-            write(f"baseline/app_config/{label}/{module}/database/{application_name}__{old_version}.yaml",
+            write(f"baseline/app_config/{label}/{module}/database/{application_name}__{app_baseline_version}.yaml",
                   baseline_app)
             current_routes = module_routing(module, env)
             baseline_routes = current_routes if module == "notification" else module_routing(module, env, baseline=True)
-            write(f"current/app_config/{label}/{module}/routing/{routes_name}__{module_version}.yaml",
+            write(f"current/app_config/{label}/{module}/routing/{routes_name}__{app_current_version}.yaml",
                   current_routes)
-            write(f"baseline/app_config/{label}/{module}/routing/{routes_name}__{old_version}.yaml",
+            write(f"baseline/app_config/{label}/{module}/routing/{routes_name}__{app_baseline_version}.yaml",
                   baseline_routes)
 
     ns_envs = [

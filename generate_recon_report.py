@@ -535,13 +535,13 @@ def build(input_dir: Path):
         changed = release_changed(ch, bh, "helm") or release_changed(cc, bb, "app_config")
         nav.append(nav_item(cid, module, changed))
         sections = [
-            ("RELEASE-DIFF · Helm", resource_release_matrix(ch, bh, "Workload (kind / metadata.name)")),
-            ("RELEASE-DIFF · App Config", app_release_config_tabs(cc, bb)),
-            ("ENV-DIFF · Helm", env_matrix(ch, "helm", "Workload / resource")),
-            ("ENV-DIFF · App Config", app_env_config_tabs(cc)),
+            ("RELEASE-DIFF · Helm", version_bar(ch, bh) + resource_release_matrix(ch, bh, "Workload (kind / metadata.name)")),
+            ("RELEASE-DIFF · App Config", version_bar(cc, bb) + app_release_config_tabs(cc, bb)),
+            ("ENV-DIFF · Helm", version_bar(ch, bh) + env_matrix(ch, "helm", "Workload / resource")),
+            ("ENV-DIFF · App Config", version_bar(cc, bb) + app_env_config_tabs(cc)),
         ]
         cards.append(f'<section id="{cid}"><h2>Application · {html.escape(module)}</h2>'
-                     f'{version_bar(ch + cc, bh + bb)}{tabs(sections)}</section>')
+                     f'{tabs(sections)}</section>')
 
     nav.append('<div class="nav-heading">Namespaces</div>')
     for airflow, label in ((False, "Service Namespaces"), (True, "Airflow Namespaces")):
@@ -563,8 +563,8 @@ TEMPLATE = """<!doctype html>
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px Inter,Segoe UI,sans-serif}
 header{position:sticky;top:0;z-index:5;background:#fffffff2;border-bottom:1px solid var(--line);padding:18px 22px;box-shadow:0 2px 10px #25385810}
 h1{margin:0;font-size:21px}aside{position:fixed;top:66px;bottom:0;width:220px;padding:18px;border-right:1px solid var(--line);background:#fff;overflow:auto}
-aside a{display:flex;align-items:center;justify-content:space-between;gap:7px;color:var(--muted);padding:9px;border-radius:6px;text-decoration:none;border-left:3px solid transparent}aside a:hover{background:#eaf3fb;color:#174a68}aside a.active{background:#dceef7;color:#0b5f7b;border-left-color:#087f8c;font-weight:700}.diff-badge{flex:none;padding:2px 5px;border-radius:9px;font-size:9px;font-weight:800;letter-spacing:.03em}.diff-badge.has-diff{color:#a62239;background:#ffe1e6}.diff-badge.no-diff{color:#17633d;background:#dcf5e6}
-.nav-heading{margin:14px 6px 6px;padding-bottom:6px;border-bottom:1px solid #dce5ef;color:#32445d;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.nav-heading:first-child{margin-top:0}
+aside a{display:flex;align-items:center;justify-content:space-between;gap:7px;color:var(--muted);padding:8px 9px;border-radius:6px;text-decoration:none;border-left:3px solid transparent;font-size:12px}aside a:hover{background:#eaf3fb;color:#174a68}aside a.active{background:#dceef7;color:#0b5f7b;border-left-color:#087f8c;font-weight:700}.diff-badge{flex:none;padding:2px 5px;border-radius:9px;font-size:8px;font-weight:800;letter-spacing:.03em}.diff-badge.has-diff{color:#a62239;background:#ffe1e6}.diff-badge.no-diff{color:#17633d;background:#dcf5e6}
+.nav-heading{margin:14px 6px 6px;padding-bottom:6px;border-bottom:1px solid #dce5ef;color:#32445d;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.nav-heading:first-child{margin-top:0}
 main{margin-left:220px;padding:22px}main>section{display:none;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}main>section.active-view{display:block}
 h2{font-size:17px;margin:0;padding:17px 18px;border-bottom:1px solid var(--line)}
 .tabs{display:flex;gap:3px;padding:10px 12px 0;overflow:auto}.tab{border:1px solid #dce5ef;border-bottom:0;background:#edf2f8;color:var(--muted);padding:10px 12px;border-radius:7px 7px 0 0;cursor:pointer;white-space:nowrap}.tab.active{background:#fff;color:#174a68;border-top:3px solid var(--cyan)}
