@@ -288,10 +288,12 @@ def main() -> None:
             current_helm = module_helm(module, env, module_version, replicas, module_image,
                                        port + port_offset, memory, feature, suffix)
             current_helm = apply_name_scenario(current_helm, module, env, suffix)
-            # Payment Service is deliberately absent only from Shanghai QA current.
-            # Baseline still contains it, exercising both ENV missing and release removal.
+            # Payment Service and ConfigMap are deliberately absent only from
+            # Shanghai QA current. Baseline retains them, exercising whole-resource
+            # removal including +/- markers on YAML parent lines.
             if module == "payment" and label == "cshg-qa":
                 current_helm = remove_workload(current_helm, "Service")
+                current_helm = remove_workload(current_helm, "ConfigMap")
             write(f"current/helm/{label}/{module}__{module_version}.yaml", current_helm)
             old_version = baseline_version
             baseline_helm = (current_helm if module == "notification" else
@@ -322,10 +324,16 @@ def main() -> None:
             if module == "risk-engine":
                 current_app += ("\nenvironment-transition-demo:\n"
                                 "  environment-to-fixed: service-common\n"
-                                f"  fixed-to-environment: service-{env}\n")
+                                f"  fixed-to-environment: service-{env}\n"
+                                "one-sided-demo:\n"
+                                "  added-fixed: enabled\n"
+                                f"  added-environment: service-{env}\n")
                 baseline_app += ("\nenvironment-transition-demo:\n"
                                  f"  environment-to-fixed: service-{env}\n"
-                                 "  fixed-to-environment: service-common\n")
+                                 "  fixed-to-environment: service-common\n"
+                                 "one-sided-demo:\n"
+                                 "  removed-fixed: legacy\n"
+                                 f"  removed-environment: service-{env}\n")
             application_name = config_name_scenario(module, "application", env)
             routes_name = config_name_scenario(module, "routes", env)
             write(f"current/app_config/{label}/{module}/database/{application_name}__{app_current_version}.yaml",

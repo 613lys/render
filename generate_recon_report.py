@@ -236,19 +236,19 @@ def hierarchical_diff_html(old, new, categories=None, show_all=False):
         pieces.append(f'<span class="expected-common">{html.escape(text[cursor:])}</span>')
         return "".join(pieces)
 
-    def expected_name_html(text):
-        """Keep the stable name prefix green and color env + SHA suffix blue."""
-        match = re.search(r"(?<![A-Za-z])(?:dev|qa|prod|pp|pr|bcp)(?![A-Za-z])", text, re.I)
-        if not match:
-            return html.escape(text)
-        return (f'<span class="expected-common">{html.escape(text[:match.start()])}</span>'
-                f'<span class="expected-env-token">{html.escape(text[match.start():])}</span>')
-
     def line(css, text, path=None):
-        category = categories.get(path, "diff-actual")
+        category = categories.get(path)
+        if category is None and path:
+            descendant_categories = {
+                value for child_path, value in categories.items()
+                if child_path.startswith(path + ".") or child_path.startswith(path + "[")
+            }
+            if len(descendant_categories) == 1:
+                category = next(iter(descendant_categories))
+        category = category or "diff-actual"
         category_class = f" diff-fragment {category}" if css in ("add", "del") else ""
         if category == "diff-expected-env" and css in ("add", "del"):
-            content = expected_name_html(text) if path == "metadata.name" else expected_line_html(text)
+            content = expected_line_html(text)
         else:
             content = html.escape(text)
         rows.append(f'<span class="{css}{category_class}">{content}</span>')
@@ -281,10 +281,51 @@ def hierarchical_diff_html(old, new, categories=None, show_all=False):
         elif key is not None:
             line("ctx", f"{pad}{key}: {scalar_text(node)}")
 
+    def emit_one_sided(node, css, indent=0, key=None, path=""):
+        """Render an added/removed YAML subtree with +/- on every real YAML line."""
+        marker = "+" if css == "add" else "-"
+        pad = " " * indent
+        if key is not None and isinstance(node, (dict, list)):
+            line(css, f"{pad}{marker} {key}:", path)
+            indent += 2
+            pad = " " * indent
+        if isinstance(node, dict):
+            for child_key, child in node.items():
+                child_path = f"{path}.{child_key}" if path else str(child_key)
+                if isinstance(child, (dict, list)):
+                    emit_one_sided(child, css, indent, child_key, child_path)
+                else:
+                    line(css, f"{' ' * indent}{marker} {child_key}: {scalar_text(child)}", child_path)
+        elif isinstance(node, list):
+            for index, child in enumerate(node):
+                child_path = f"{path}[{index}]"
+                if isinstance(child, dict):
+                    line(css, f"{pad}{marker} -", child_path)
+                    for child_key, value in child.items():
+                        nested_path = f"{child_path}.{child_key}"
+                        if isinstance(value, (dict, list)):
+                            emit_one_sided(value, css, indent + 2, child_key, nested_path)
+                        else:
+                            line(css, f"{' ' * (indent + 2)}{marker} {child_key}: {scalar_text(value)}",
+                                 nested_path)
+                elif isinstance(child, list):
+                    line(css, f"{pad}{marker} -", child_path)
+                    emit_one_sided(child, css, indent + 2, path=child_path)
+                else:
+                    line(css, f"{pad}{marker} - {scalar_text(child)}", child_path)
+        elif key is not None:
+            line(css, f"{pad}{marker} {key}: {scalar_text(node)}", path)
+
     def walk(a, b, indent=0, key=None, path=""):
         if a is not _OMIT and b is not _OMIT and a == b:
             if show_all:
                 emit_context(a, indent, key)
+            return
+        if a is _OMIT and isinstance(b, (dict, list)):
+            emit_one_sided(b, "add", indent, key, path)
+            return
+        if b is _OMIT and isinstance(a, (dict, list)):
+            emit_one_sided(a, "del", indent, key, path)
             return
         pad = " " * indent
         a_container = isinstance(a, (dict, list))
@@ -466,10 +507,6 @@ def classify_diff_events(old, new, signature_counts=None, shared_required=0, unm
         if (not unmatched and environment_candidate and shared_required > 0
                 and signature_counts[signature] == shared_required):
             result[path] = "diff-expected-env"
-        elif path == "metadata.name":
-            # A name change that is not a verified environment-only rename is a
-            # matching problem to review, even if the same pattern repeats.
-            result[path] = "diff-actual"
         elif (not unmatched and shared_required > 0
               and signature_counts[signature] == shared_required):
             result[path] = "diff-all-namespaces"

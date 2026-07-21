@@ -63,6 +63,38 @@ class ReconciliationReportTests(unittest.TestCase):
         self.assertIn('<span class="add diff-fragment diff-actual">          + containerPort: 8081</span>', colored)
         self.assertNotIn('<span class="add">+ spec:</span>', colored)
 
+    def test_removed_resource_marks_parent_and_leaf_yaml_lines(self):
+        old = """apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payment-config
+data:
+  application.yaml:
+    server:
+      port: 8080
+"""
+        rendered = report.hierarchical_diff_html(old, "")
+        self.assertIn('class="del diff-fragment diff-actual">- metadata:</span>', rendered)
+        self.assertIn('class="del diff-fragment diff-actual">  - name: payment-config</span>', rendered)
+        self.assertIn('class="del diff-fragment diff-actual">- data:</span>', rendered)
+        self.assertIn('class="del diff-fragment diff-actual">    - server:</span>', rendered)
+        self.assertIn('class="del diff-fragment diff-actual">      - port: 8080</span>', rendered)
+        self.assertNotIn('<span class="ctx">metadata:</span>', rendered)
+
+    def test_added_resource_marks_parent_and_leaf_yaml_lines(self):
+        new = """apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payment-config
+data:
+  application.yaml:
+    enabled: true
+"""
+        rendered = report.hierarchical_diff_html("", new)
+        self.assertIn('class="add diff-fragment diff-actual">+ metadata:</span>', rendered)
+        self.assertIn('class="add diff-fragment diff-actual">+ data:</span>', rendered)
+        self.assertIn('class="add diff-fragment diff-actual">    + enabled: true</span>', rendered)
+
     def test_only_environment_suffix_changes_are_expected(self):
         old = "metadata:\n  name: payment-dev\nserver:\n  port: 8080\n"
         new = "metadata:\n  name: payment-qa\nserver:\n  port: 8081\n"
@@ -99,15 +131,23 @@ class ReconciliationReportTests(unittest.TestCase):
         self.assertIn('<span class="expected-env-token">qa</span>', rendered)
         self.assertIn('<span class="expected-env-token">dev</span>', rendered)
 
-    def test_sha_names_are_not_expected_diff(self):
+    def test_sha_names_are_not_expected_but_follow_normal_shared_rule(self):
         old = "metadata:\n  name: payment-qa-sha256-a1b2c3d4\n"
         new = "metadata:\n  name: payment-dev-sha256-deadbeef\n"
         path, values = next(iter(report.diff_events(old, new).items()))
         signatures = Counter({report.event_signature(path, *values): 6})
         classified = report.classify_diff_events(old, new, signatures, shared_required=6)
         rendered = report.hierarchical_diff_html(old, new, classified)
-        self.assertEqual(classified[path], "diff-actual")
-        self.assertIn('class="del diff-fragment diff-actual"', rendered)
+        self.assertEqual(classified[path], "diff-all-namespaces")
+        self.assertIn('class="del diff-fragment diff-all-namespaces"', rendered)
+
+    def test_metadata_name_uses_normal_shared_diff_rule(self):
+        old = "metadata:\n  name: old-service\n"
+        new = "metadata:\n  name: new-service\n"
+        path, values = next(iter(report.diff_events(old, new).items()))
+        signatures = Counter({report.event_signature(path, *values): 6})
+        classified = report.classify_diff_events(old, new, signatures, shared_required=6)
+        self.assertEqual(classified[path], "diff-all-namespaces")
 
     def test_environment_suffix_in_only_one_namespace_is_regular_diff(self):
         old = "metadata:\n  name: payment-dev\n"
@@ -152,6 +192,35 @@ class ReconciliationReportTests(unittest.TestCase):
         )
         self.assertEqual(expected_paths, {"target"})
         self.assertEqual(classified["target"], "diff-expected-env")
+
+    def test_fixed_one_sided_field_is_shared_in_all_namespaces(self):
+        pairs = [("{}\n", "added: enabled\n") for _ in range(6)]
+        signatures = Counter()
+        for old, new in pairs:
+            for path, values in report.diff_events(old, new).items():
+                signatures[report.event_signature(path, *values)] += 1
+        classified = report.classify_diff_events(
+            *pairs[0], signatures, shared_required=6,
+            aggregate_expected_paths=report.aggregate_environment_paths(pairs, 6),
+        )
+        self.assertEqual(classified["added"], "diff-all-namespaces")
+
+    def test_environment_one_sided_field_is_expected(self):
+        pairs = [
+            ("{}\n", f"added: service-{env}\n")
+            for env in ("dev", "qa", "prod", "dev", "qa", "prod")
+        ]
+        signatures = Counter()
+        for old, new in pairs:
+            for path, values in report.diff_events(old, new).items():
+                signatures[report.event_signature(path, *values)] += 1
+        expected_paths = report.aggregate_environment_paths(pairs, 6)
+        classified = report.classify_diff_events(
+            *pairs[0], signatures, shared_required=6,
+            aggregate_expected_paths=expected_paths,
+        )
+        self.assertEqual(expected_paths, {"added"})
+        self.assertEqual(classified["added"], "diff-expected-env")
 
     def test_same_diff_in_every_namespace_has_own_class(self):
         old = "server:\n  port: 8080\n"
