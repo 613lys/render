@@ -77,3 +77,6 @@ python generate_recon_report.py \
 ```
 
 Generated mock data and reports are local artifacts and should not be committed.
+The generated App Config includes explicit release-diff classification examples
+under `release-demo`: one change shared by all namespaces, one environment-only
+suffix change, and one ordinary environment-specific value change.

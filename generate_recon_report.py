@@ -4,7 +4,7 @@ import difflib
 import html
 import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import yaml
@@ -33,6 +33,9 @@ CLUSTER_ORDER = {"shg": 0, "bjv": 1}
 
 class PrettyDumper(yaml.SafeDumper):
     """Keep embedded ConfigMap/config text readable instead of escaping newlines."""
+
+    def increase_indent(self, flow=False, indentless=False):
+        return super().increase_indent(flow, False)
 
 
 def _represent_string(dumper, value):
@@ -131,6 +134,348 @@ def flatten(value, prefix=""):
     else:
         out[prefix] = value
     return out
+
+
+def semantic_fields_from_text(text):
+    fields = {}
+    docs = yaml_docs(text)
+    for doc_index, doc in enumerate(docs):
+        prefix = f"doc[{doc_index}]." if len(docs) > 1 else ""
+        for path, value in flatten(doc).items():
+            full_path = prefix + path
+            if isinstance(value, str) and "\n" in value:
+                try:
+                    embedded = yaml.safe_load(value)
+                except yaml.YAMLError:
+                    embedded = None
+                if isinstance(embedded, (dict, list)):
+                    for nested_path, nested_value in flatten(embedded, full_path).items():
+                        fields[nested_path] = nested_value
+                    continue
+            fields[full_path] = value
+    if not docs:
+        fields["raw"] = text
+    return fields
+
+
+def semantic_text(text):
+    return "\n".join(f"{path}: {scalar_text(value)}"
+                     for path, value in sorted(semantic_fields_from_text(text).items()))
+
+
+def expand_embedded_yaml(node):
+    if isinstance(node, dict):
+        return {key: expand_embedded_yaml(value) for key, value in node.items()}
+    if isinstance(node, list):
+        return [expand_embedded_yaml(value) for value in node]
+    if isinstance(node, str) and "\n" in node:
+        try:
+            parsed = yaml.safe_load(node)
+        except yaml.YAMLError:
+            parsed = None
+        if isinstance(parsed, (dict, list)):
+            return expand_embedded_yaml(parsed)
+    return node
+
+
+def prune_yaml(node, changed_paths, path=""):
+    if isinstance(node, dict):
+        result = {}
+        for key, value in node.items():
+            child_path = f"{path}.{key}" if path else str(key)
+            child = prune_yaml(value, changed_paths, child_path)
+            if child is not _OMIT:
+                result[key] = child
+        return result if result else _OMIT
+    if isinstance(node, list):
+        result = []
+        for index, value in enumerate(node):
+            child_path = f"{path}[{index}]"
+            child = prune_yaml(value, changed_paths, child_path)
+            if child is not _OMIT:
+                if isinstance(value, dict) and isinstance(child, dict) and "name" in value:
+                    child = {"name": value["name"], **child}
+                result.append(child)
+        return result if result else _OMIT
+    return node if path in changed_paths else _OMIT
+
+
+_OMIT = object()
+
+
+def hierarchical_diff_texts(old, new):
+    old_docs = yaml_docs(old)
+    new_docs = yaml_docs(new)
+    old_value = expand_embedded_yaml(old_docs[0]) if old_docs else {}
+    new_value = expand_embedded_yaml(new_docs[0]) if new_docs else {}
+    old_flat, new_flat = flatten(old_value), flatten(new_value)
+    changed = {path for path in set(old_flat) | set(new_flat)
+               if old_flat.get(path, _OMIT) != new_flat.get(path, _OMIT)}
+    old_changed = prune_yaml(old_value, changed)
+    new_changed = prune_yaml(new_value, changed)
+    dump = lambda value: yaml.dump({} if value is _OMIT else value, Dumper=PrettyDumper,
+                                   sort_keys=False, allow_unicode=True, width=120).rstrip()
+    return dump(old_changed), dump(new_changed), dump(old_value), dump(new_value)
+
+
+def hierarchical_diff_html(old, new, categories=None, show_all=False):
+    old_docs, new_docs = yaml_docs(old), yaml_docs(new)
+    left = expand_embedded_yaml(old_docs[0]) if old_docs else _OMIT
+    right = expand_embedded_yaml(new_docs[0]) if new_docs else _OMIT
+    rows = []
+
+    categories = categories or {}
+
+    def expected_line_html(text):
+        pattern = re.compile(r"(?<![A-Za-z])(?:dev|qa|prod|pp|pr|bcp)(?![A-Za-z])", re.I)
+        pieces, cursor = [], 0
+        for match in pattern.finditer(text):
+            pieces.append(f'<span class="expected-common">{html.escape(text[cursor:match.start()])}</span>')
+            pieces.append(f'<span class="expected-env-token">{html.escape(match.group(0))}</span>')
+            cursor = match.end()
+        pieces.append(f'<span class="expected-common">{html.escape(text[cursor:])}</span>')
+        return "".join(pieces)
+
+    def expected_name_html(text):
+        """Keep the stable name prefix green and color env + SHA suffix blue."""
+        match = re.search(r"(?<![A-Za-z])(?:dev|qa|prod|pp|pr|bcp)(?![A-Za-z])", text, re.I)
+        if not match:
+            return html.escape(text)
+        return (f'<span class="expected-common">{html.escape(text[:match.start()])}</span>'
+                f'<span class="expected-env-token">{html.escape(text[match.start():])}</span>')
+
+    def line(css, text, path=None):
+        category = categories.get(path, "diff-actual")
+        category_class = f" diff-fragment {category}" if css in ("add", "del") else ""
+        if category == "diff-expected-env" and css in ("add", "del"):
+            content = expected_name_html(text) if path == "metadata.name" else expected_line_html(text)
+        else:
+            content = html.escape(text)
+        rows.append(f'<span class="{css}{category_class}">{content}</span>')
+
+    def scalar_line(prefix, value):
+        return f"{prefix}{scalar_text(value)}"
+
+    def emit_context(node, indent=0, key=None):
+        pad = " " * indent
+        if key is not None and isinstance(node, (dict, list)):
+            line("ctx", f"{pad}{key}:")
+            indent += 2
+            pad = " " * indent
+        if isinstance(node, dict):
+            for child_key, child in node.items():
+                if isinstance(child, (dict, list)):
+                    emit_context(child, indent, child_key)
+                else:
+                    line("ctx", f"{' ' * indent}{child_key}: {scalar_text(child)}")
+        elif isinstance(node, list):
+            for child in node:
+                if isinstance(child, dict) and "name" in child:
+                    line("ctx", f"{pad}- name: {scalar_text(child['name'])}")
+                    emit_context({k: v for k, v in child.items() if k != "name"}, indent + 2)
+                elif isinstance(child, (dict, list)):
+                    line("ctx", f"{pad}-")
+                    emit_context(child, indent + 2)
+                else:
+                    line("ctx", f"{pad}- {scalar_text(child)}")
+        elif key is not None:
+            line("ctx", f"{pad}{key}: {scalar_text(node)}")
+
+    def walk(a, b, indent=0, key=None, path=""):
+        if a is not _OMIT and b is not _OMIT and a == b:
+            if show_all:
+                emit_context(a, indent, key)
+            return
+        pad = " " * indent
+        a_container = isinstance(a, (dict, list))
+        b_container = isinstance(b, (dict, list))
+        if key is not None and (a_container or b_container):
+            line("ctx", f"{pad}{key}:")
+            indent += 2
+            pad = " " * indent
+        if isinstance(a, dict) or isinstance(b, dict):
+            left_dict = a if isinstance(a, dict) else {}
+            right_dict = b if isinstance(b, dict) else {}
+            keys = list(left_dict)
+            keys.extend(k for k in right_dict if k not in left_dict)
+            for child_key in keys:
+                child_path = f"{path}.{child_key}" if path else str(child_key)
+                av = left_dict.get(child_key, _OMIT)
+                bv = right_dict.get(child_key, _OMIT)
+                if av is not _OMIT and bv is not _OMIT and av == bv:
+                    if show_all:
+                        emit_context(av, indent, child_key)
+                    continue
+                if isinstance(av, (dict, list)) or isinstance(bv, (dict, list)):
+                    walk(av, bv, indent, child_key, child_path)
+                else:
+                    if av is not _OMIT:
+                        line("del", scalar_line(f"{' ' * indent}- {child_key}: ", av), child_path)
+                    if bv is not _OMIT:
+                        line("add", scalar_line(f"{' ' * indent}+ {child_key}: ", bv), child_path)
+            return
+        if isinstance(a, list) or isinstance(b, list):
+            left_list = a if isinstance(a, list) else []
+            right_list = b if isinstance(b, list) else []
+            for index in range(max(len(left_list), len(right_list))):
+                child_path = f"{path}[{index}]"
+                av = left_list[index] if index < len(left_list) else _OMIT
+                bv = right_list[index] if index < len(right_list) else _OMIT
+                if av is not _OMIT and bv is not _OMIT and av == bv:
+                    if show_all:
+                        if isinstance(av, dict) and "name" in av:
+                            line("ctx", f"{' ' * indent}- name: {scalar_text(av['name'])}")
+                            emit_context({k: v for k, v in av.items() if k != "name"}, indent + 2)
+                        elif isinstance(av, (dict, list)):
+                            line("ctx", f"{' ' * indent}-")
+                            emit_context(av, indent + 2)
+                        else:
+                            line("ctx", f"{' ' * indent}- {scalar_text(av)}")
+                    continue
+                left_name = av.get("name") if isinstance(av, dict) else None
+                right_name = bv.get("name") if isinstance(bv, dict) else None
+                if left_name is not None and left_name == right_name:
+                    line("ctx", f"{pad}- name: {left_name}")
+                    walk({k: v for k, v in av.items() if k != "name"},
+                         {k: v for k, v in bv.items() if k != "name"}, indent + 2,
+                         path=child_path)
+                else:
+                    line("ctx", f"{pad}-")
+                    walk(av, bv, indent + 2, path=child_path)
+            return
+        prefix = f"{pad}{key}: " if key is not None else pad
+        if a is not _OMIT:
+            line("del", scalar_line(prefix.replace(pad, pad + "- ", 1), a), path)
+        if b is not _OMIT:
+            line("add", scalar_line(prefix.replace(pad, pad + "+ ", 1), b), path)
+
+    walk(left, right)
+    return "<br>".join(rows) or '<span class="yaml-same">No release changes</span>'
+
+
+def normalized_diff_signature(old, new):
+    old_sem, new_sem = semantic_text(old), semantic_text(new)
+    changed = list(difflib.unified_diff(old_sem.splitlines(), new_sem.splitlines(), n=0, lineterm=""))
+    signature = "\n".join(line for line in changed if not line.startswith(("---", "+++", "@@")))
+    signature = re.sub(r"(?:c?shg|c?bjv)(?:-ms)?[-_](?:dev|qa|prod|pp|pr|bcp)", "<env>", signature, flags=re.I)
+    signature = re.sub(r"(?<![a-z])(?:dev|qa|prod|pp|pr|bcp)(?![a-z])", "<env>", signature, flags=re.I)
+    signature = re.sub(r"(?:sha(?:1|256)-?)?[0-9a-f]{7,64}", "<sha>", signature, flags=re.I)
+    return signature
+
+
+def environment_only_diff(old, new):
+    left, right = semantic_fields_from_text(old), semantic_fields_from_text(new)
+    differing = {path for path in set(left) | set(right) if left.get(path) != right.get(path)}
+    if not differing:
+        return False
+    for path in differing:
+        if path not in left or path not in right:
+            return False
+        a, b = str(left[path]), str(right[path])
+        clean = lambda s: re.sub(r"(?:c?shg|c?bjv)(?:-ms)?[-_]?(?:dev|qa|prod|pp|pr|bcp)|(?:dev|qa|prod|pp|pr|bcp)", "<env>", s, flags=re.I)
+        if normalize_name(a) != normalize_name(b) and clean(a) != clean(b):
+            return False
+    return True
+
+
+def diff_events(old, new):
+    old_docs, new_docs = yaml_docs(old), yaml_docs(new)
+    left = flatten(expand_embedded_yaml(old_docs[0])) if old_docs else {}
+    right = flatten(expand_embedded_yaml(new_docs[0])) if new_docs else {}
+    return {path: (left.get(path, _OMIT), right.get(path, _OMIT))
+            for path in set(left) | set(right)
+            if left.get(path, _OMIT) != right.get(path, _OMIT)}
+
+
+def normalize_event_text(value):
+    if value is _OMIT:
+        return "<missing>"
+    text = str(value)
+    text = re.sub(r"(?:c?shg|c?bjv)(?:-ms)?[-_]?(?:dev|qa|prod|pp|pr|bcp)", "<env>", text, flags=re.I)
+    text = re.sub(r"(?<![a-z])(?:dev|qa|prod|pp|pr|bcp)(?![a-z])", "<env>", text, flags=re.I)
+    return re.sub(r"(?:sha(?:1|256)-?)?[0-9a-f]{7,64}", "<sha>", text, flags=re.I)
+
+
+def event_signature(path, old_value, new_value):
+    return (normalize_event_text(path), normalize_event_text(old_value),
+            normalize_event_text(new_value))
+
+
+def event_is_environment_only(old_value, new_value):
+    if old_value is _OMIT or new_value is _OMIT:
+        return False
+    a, b = str(old_value), str(new_value)
+    # Expected Diff currently handles environment-only names. SHA-bearing names
+    # stay as regular diffs until their matching semantics are defined.
+    sha_pattern = r"(?:sha(?:1|256)-?)?[0-9a-f]{7,64}"
+    if re.search(sha_pattern, a, re.I) or re.search(sha_pattern, b, re.I):
+        return False
+    normalize_env = lambda text: re.sub(
+        r"(?:c?shg|c?bjv)(?:-ms)?[-_]?(?:dev|qa|prod|pp|pr|bcp)|(?<![a-z])(?:dev|qa|prod|pp|pr|bcp)(?![a-z])",
+        "<env>", text, flags=re.I)
+    return a != b and normalize_env(a) == normalize_env(b)
+
+
+def aggregate_environment_paths(text_pairs, required):
+    """Find fields whose baseline or current side varies only by environment."""
+    values_by_path = defaultdict(list)
+    env_pattern = re.compile(
+        r"(?:c?shg|c?bjv)(?:-ms)?[-_]?(?:dev|qa|prod|pp|pr|bcp)|(?<![a-z])(?:dev|qa|prod|pp|pr|bcp)(?![a-z])",
+        re.I)
+    sha_pattern = re.compile(r"(?:sha(?:1|256)-?)?[0-9a-f]{7,64}", re.I)
+    for old, new in text_pairs:
+        for path, values in diff_events(old, new).items():
+            values_by_path[path].append(values)
+
+    def side_varies_as_environment(values):
+        if len(values) != required or any(value is _OMIT for value in values):
+            return False
+        raw = [str(value) for value in values]
+        return (len(set(raw)) > 1
+                and all(env_pattern.search(value) for value in raw)
+                and not any(sha_pattern.search(value) for value in raw)
+                and len({env_pattern.sub("<env>", value) for value in raw}) == 1)
+
+    return {path for path, values in values_by_path.items()
+            if side_varies_as_environment([old for old, _ in values])
+            or side_varies_as_environment([new for _, new in values])}
+
+
+def classify_diff_events(old, new, signature_counts=None, shared_required=0, unmatched=False,
+                         aggregate_expected_paths=None):
+    signature_counts = signature_counts or Counter()
+    aggregate_expected_paths = aggregate_expected_paths or set()
+    events = diff_events(old, new)
+    expected_renames = set()
+    if not unmatched:
+        removed = [(path, values[0]) for path, values in events.items()
+                   if values[0] is not _OMIT and values[1] is _OMIT]
+        added = [(path, values[1]) for path, values in events.items()
+                 if values[0] is _OMIT and values[1] is not _OMIT]
+        for old_path, old_value in removed:
+            for new_path, new_value in added:
+                if (normalize_event_text(old_path) == normalize_event_text(new_path)
+                        and normalize_event_text(old_value) == normalize_event_text(new_value)):
+                    expected_renames.update((old_path, new_path))
+    result = {}
+    for path, (old_value, new_value) in events.items():
+        signature = event_signature(path, old_value, new_value)
+        environment_candidate = (path in expected_renames
+                                 or path in aggregate_expected_paths
+                                 or event_is_environment_only(old_value, new_value))
+        if (not unmatched and environment_candidate and shared_required > 0
+                and signature_counts[signature] == shared_required):
+            result[path] = "diff-expected-env"
+        elif path == "metadata.name":
+            # A name change that is not a verified environment-only rename is a
+            # matching problem to review, even if the same pattern repeats.
+            result[path] = "diff-actual"
+        elif (not unmatched and shared_required > 0
+              and signature_counts[signature] == shared_required):
+            result[path] = "diff-all-namespaces"
+        else:
+            result[path] = "diff-actual"
+    return result
 
 
 def differences(values_by_env):
@@ -430,6 +775,16 @@ def release_matrix(current, baseline, title, kind="generic"):
         head = "".join(f"<th>{html.escape(e)}</th>" for e in envs)
     rows = []
     for logical in logicals:
+        signatures = Counter()
+        text_pairs = []
+        for env in envs:
+            c = cg.get((env, logical), [])
+            b = bg.get((env, logical), [])
+            if c and b:
+                text_pairs.append((b[0]["text"], c[0]["text"]))
+                for path, (old_value, new_value) in diff_events(b[0]["text"], c[0]["text"]).items():
+                    signatures[event_signature(path, old_value, new_value)] += 1
+        aggregate_expected = aggregate_environment_paths(text_pairs, len(envs))
         cells = []
         for env in envs:
             c = cg.get((env, logical), [])
@@ -437,16 +792,21 @@ def release_matrix(current, baseline, title, kind="generic"):
             cur = c[0] if c else None
             base = b[0] if b else None
             old_text, new_text = base["text"] if base else "", cur["text"] if cur else ""
+            old_compare, new_compare, old_full, new_full = hierarchical_diff_texts(old_text, new_text)
             old_name = f'baseline/{base["path"].name if base else "missing"}'
             new_name = f'current/{cur["path"].name if cur else "missing"}'
-            compact_diff = unified(old_text, new_text, old_name, new_name)
-            full_diff = unified(old_text, new_text, old_name, new_name, show_all=True)
+            categories = classify_diff_events(old_text, new_text, signatures, len(envs),
+                                              unmatched=(base is None or cur is None),
+                                              aggregate_expected_paths=aggregate_expected)
+            compact_diff = hierarchical_diff_html(old_text, new_text, categories)
+            full_diff = hierarchical_diff_html(old_text, new_text, categories, show_all=True)
             cells.append(f'<td><pre class="diff-compact">{compact_diff}</pre>'
                          f'<pre class="diff-full hidden">{full_diff}</pre></td>')
         rows.append(f'<tr><th class="row-title">{html.escape(logical)}</th>{"".join(cells)}</tr>')
     return (f'<div class="toolbar release-toolbar"><button class="release-view-toggle" '
             f'data-show-all="false">Show all lines</button>'
             f'<span>Only changed lines are currently shown</span></div>'
+            f'{diff_legend()}'
             f'<div class="table-wrap"><table class="matrix release"><thead><tr><th>Resource</th>'
             f'{head}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>')
 
@@ -468,6 +828,16 @@ def resource_release_matrix(current, baseline, title, raw_env_headers=False):
     head = "".join(f'<th><b>{html.escape(env)}</b></th>' for env in envs)
     rows = []
     for workload in workloads:
+        signatures = Counter()
+        text_pairs = []
+        for env in envs:
+            old = bg.get(env, {}).get(workload)
+            new = cg.get(env, {}).get(workload)
+            if old is not None and new is not None:
+                text_pairs.append((old, new))
+                for path, (old_value, new_value) in diff_events(old, new).items():
+                    signatures[event_signature(path, old_value, new_value)] += 1
+        aggregate_expected = aggregate_environment_paths(text_pairs, len(envs))
         cells = []
         for env in envs:
             old = bg.get(env, {}).get(workload)
@@ -481,8 +851,12 @@ def resource_release_matrix(current, baseline, title, raw_env_headers=False):
                 status = '<div class="workload-status removed-status">Removed from current</div>'
             else:
                 status = ""
-            compact = unified(old or "", new or "", "baseline", "current")
-            full = unified(old or "", new or "", "baseline", "current", show_all=True)
+            old_compare, new_compare, old_full, new_full = hierarchical_diff_texts(old or "", new or "")
+            categories = classify_diff_events(old or "", new or "", signatures, len(envs),
+                                              unmatched=(old is None or new is None),
+                                              aggregate_expected_paths=aggregate_expected)
+            compact = hierarchical_diff_html(old or "", new or "", categories)
+            full = hierarchical_diff_html(old or "", new or "", categories, show_all=True)
             cells.append(f'<td>{status}'
                          f'<div class="collapse-box diff-compact"><pre class="collapsible-content">{compact}</pre></div>'
                          f'<div class="collapse-box diff-full hidden"><pre class="collapsible-content">{full}</pre></div></td>')
@@ -491,9 +865,18 @@ def resource_release_matrix(current, baseline, title, raw_env_headers=False):
     return (f'<div class="toolbar release-toolbar"><button class="release-view-toggle" '
             f'data-show-all="false">Show all lines</button>'
             f'<span>Workloads are matched by kind + normalized metadata.name</span></div>'
+            f'{diff_legend()}'
             f'<div class="table-wrap"><table class="matrix release workload-release">'
             f'<thead><tr><th>Resource</th>{head}</tr></thead>'
             f'<tbody>{"".join(rows)}</tbody></table></div>')
+
+
+def diff_legend():
+    return ('<div class="diff-legend">'
+            '<span class="legend-all">Diff in all namespaces</span>'
+            '<span class="legend-env">Expected Diff · environment suffix only</span>'
+            '<span class="legend-actual">Diff</span>'
+            '</div>')
 
 
 def tabs(sections, extra_class=""):
@@ -608,6 +991,7 @@ th small{display:block;color:var(--yellow);margin-top:5px;font-weight:400}td{bac
 .release td pre{margin:4px 6px;padding:6px 8px;font-size:11px;line-height:1.28}.release .add,.release .del,.release .hunk,.release .diff-file,.release .ctx{display:inline;margin:0;padding:0;line-height:1.28}
 .release-toolbar{display:flex;align-items:center;gap:10px}.release-toolbar span{font-size:12px}.release-view-toggle{border:1px solid #2c7699;background:#edf7fb;color:#1d607f;border-radius:6px;padding:7px 11px;cursor:pointer}.release-view-toggle:hover{background:#dceff7}.hidden{display:none!important}
 .workload-title{font-weight:700}.workload-status{margin:6px 7px 0;padding:4px 8px;font-size:11px;font-weight:700;border-left:3px solid}.added-status{color:#08733f;border-color:#08733f}.removed-status{color:#c12640;border-color:#c12640}.absent-workload{min-height:36px;background:#fafbfd}
+.diff-fragment{display:inline-block!important;width:100%;border-radius:2px}.diff-fragment.diff-all-namespaces{background:#e4f6ea}.diff-fragment.diff-expected-env{background:transparent}.diff-fragment.diff-actual{background:#ffe7eb}.expected-common{background:#e4f6ea}.expected-env-token{background:#bfe3f7;border-radius:2px;font-weight:800}.diff-legend{display:flex;flex:none;gap:7px;padding:4px 7px;font-size:9px;color:#52637b}.diff-legend span{padding:2px 6px;border-radius:8px}.legend-all{background:#dff3e6}.legend-env{background:#bfe3f7;color:#086b9c}.legend-actual{background:#ffe0e5}
 .collapse-box{position:relative}.collapsible-content{max-height:280px;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable}.field-collapse .collapsible-content{max-height:92px;white-space:pre-wrap}.collapsible-content::-webkit-scrollbar{width:7px}.collapsible-content::-webkit-scrollbar-thumb{background:#b8c8d5;border-radius:6px}.collapsible-content::-webkit-scrollbar-track{background:#edf2f6}
 .release-version-bar{display:flex;flex:none;align-items:center;gap:10px;padding:7px 12px;background:#f7fafc;border-bottom:1px solid var(--line)}.release-version-bar>div:not(.version-arrow){display:flex;align-items:center;gap:6px}.release-version-bar span{color:var(--muted);font-size:10px}.release-version-bar b{color:#174f6b;font:600 11px Consolas,monospace}.version-arrow{color:#6f8198;font-size:14px}
 .only-differences .same-row{display:none}@media(max-width:800px){aside{display:none}main{top:56px;right:0;bottom:0;left:0;margin:0;padding:8px}}

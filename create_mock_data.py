@@ -14,7 +14,7 @@ def write(rel: str, text: str) -> None:
 def helm(env: str, version: str, replicas: int, image: str, port: int, memory: str,
          feature: bool, suffix: str, baseline: bool = False) -> str:
     comment = "# Source: payment/templates/deployment.yaml"
-    old = "legacyFlag: true\n" if baseline else ""
+    old = '        legacyFlag: "true"\n' if baseline else ""
     optional = "        FEATURE_FAST_PAY: \"true\"\n" if feature else ""
     return f"""
 {comment}
@@ -81,6 +81,10 @@ def app_config(env: str, db: str, pool: int, kafka: str, timeout: int,
                feature: bool, server_port: int = 8080, baseline: bool = False) -> str:
     removed = "  legacy-mode: true\n" if baseline else ""
     feature_line = f"  fast-pay: {str(feature).lower()}\n"
+    shared_mode = "legacy" if baseline else "modern"
+    previous_env = {"dev": "qa", "qa": "prod", "prod": "dev"}.get(env, "qa")
+    environment_alias = f"service-{previous_env}" if baseline else f"service-{env}"
+    review_threshold = 10 if baseline else {"dev": 12, "qa": 15, "prod": 20}.get(env, 12)
     return f"""
 spring:
   application:
@@ -104,6 +108,10 @@ features:
 custom-unmapped:
   owner: platform
   note: "must remain visible"
+release-demo:
+  shared-mode: {shared_mode}
+  environment-alias: {environment_alias}
+  review-threshold: {review_threshold}
 """
 
 
@@ -141,18 +149,13 @@ def remove_workload(text: str, kind: str) -> str:
 
 
 def apply_name_scenario(text: str, module: str, env: str, suffix: str) -> str:
-    """Exercise identical, environment-only, and environment+SHA resource names."""
+    """Exercise identical and environment-only resource names."""
     if module == "inventory":
         replacement = ""
     elif module == "notification":
         replacement = f"-{env}"
     elif module == "risk-engine":
-        sha = {
-            "dev": "a1b2c3d4",
-            "qa": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            "prod": "f6e5d4c3b2a10987",
-        }[env]
-        replacement = f"-{env}-sha256-{sha}"
+        replacement = f"-{env}"
     else:
         return text
     return (text.replace(f"{module}-api-{suffix}", f"{module}-api{replacement}")
@@ -163,10 +166,7 @@ def config_name_scenario(module: str, base: str, env: str) -> str:
     if module == "inventory":
         return base
     if module == "risk-engine":
-        sha = "a1b2c3d4" if env == "dev" else (
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-            if env == "qa" else "f6e5d4c3b2a10987")
-        return f"{base}-{env}-sha256-{sha}"
+        return f"{base}-{env}"
     return f"{base}-{env}"
 
 
@@ -301,6 +301,14 @@ def main() -> None:
                                          baseline=True))
             if module != "notification":
                 baseline_helm = apply_name_scenario(baseline_helm, module, env, suffix)
+            # Exercise a true Helm Expected Diff in all six namespaces: only the
+            # environment suffix changes between baseline and current.
+            if module == "risk-engine":
+                previous_env = {"dev": "qa", "qa": "prod", "prod": "dev"}[env]
+                baseline_helm = (baseline_helm
+                                 .replace(f"{module}-api-{env}", f"{module}-api-{previous_env}")
+                                 .replace(f"{module}-config-{env}", f"{module}-config-{previous_env}")
+                                 .replace(f"application-{env}.yaml", f"application-{previous_env}.yaml"))
             write(f"baseline/helm/{label}/{module}__{old_version}.yaml", baseline_helm)
 
             current_app = module_config(module, env, f"{module}-db-{env}",
@@ -311,6 +319,13 @@ def main() -> None:
                             module_config(module, env, f"{module}-db-{env}-old", 4,
                                           f"kafka-{env}", 3000, False,
                                           server_port=8080 + port_offset, baseline=True))
+            if module == "risk-engine":
+                current_app += ("\nenvironment-transition-demo:\n"
+                                "  environment-to-fixed: service-common\n"
+                                f"  fixed-to-environment: service-{env}\n")
+                baseline_app += ("\nenvironment-transition-demo:\n"
+                                 f"  environment-to-fixed: service-{env}\n"
+                                 "  fixed-to-environment: service-common\n")
             application_name = config_name_scenario(module, "application", env)
             routes_name = config_name_scenario(module, "routes", env)
             write(f"current/app_config/{label}/{module}/database/{application_name}__{app_current_version}.yaml",
