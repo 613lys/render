@@ -222,6 +222,31 @@ data:
         self.assertEqual(expected_paths, {"added"})
         self.assertEqual(classified["added"], "diff-expected-env")
 
+    def test_parent_added_in_all_namespaces_is_green_even_when_children_are_environmental(self):
+        pairs = [
+            ("{}\n", f"settings:\n  endpoint: service-{env}\n")
+            for env in ("dev", "qa", "prod", "dev", "qa", "prod")
+        ]
+        parent_categories = report.shared_one_sided_parent_categories(pairs, 6)
+        self.assertEqual(parent_categories, {"settings": "diff-all-namespaces"})
+
+        signatures = Counter()
+        for old, new in pairs:
+            for path, values in report.diff_events(old, new).items():
+                signatures[report.event_signature(path, *values)] += 1
+        categories = report.classify_diff_events(
+            *pairs[0], signatures, shared_required=6,
+            aggregate_expected_paths=report.aggregate_environment_paths(pairs, 6),
+        )
+        categories.update(parent_categories)
+        rendered = report.hierarchical_diff_html(*pairs[0], categories)
+        self.assertIn(
+            'class="add diff-fragment diff-all-namespaces">+ settings:</span>', rendered
+        )
+        self.assertIn(
+            'class="add diff-fragment diff-expected-env"', rendered
+        )
+
     def test_same_diff_in_every_namespace_has_own_class(self):
         old = "server:\n  port: 8080\n"
         new = "server:\n  port: 8081\n"

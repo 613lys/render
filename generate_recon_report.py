@@ -428,6 +428,46 @@ def diff_events(old, new):
             if left.get(path, _OMIT) != right.get(path, _OMIT)}
 
 
+def container_paths_from_text(text):
+    docs = yaml_docs(text)
+    root = expand_embedded_yaml(docs[0]) if docs else {}
+    paths = set()
+
+    def walk(node, path=""):
+        if isinstance(node, dict):
+            for key, child in node.items():
+                child_path = f"{path}.{key}" if path else str(key)
+                if isinstance(child, (dict, list)):
+                    paths.add(child_path)
+                    walk(child, child_path)
+        elif isinstance(node, list):
+            for index, child in enumerate(node):
+                child_path = f"{path}[{index}]"
+                if isinstance(child, (dict, list)):
+                    paths.add(child_path)
+                    walk(child, child_path)
+
+    walk(root)
+    return paths
+
+
+def shared_one_sided_parent_categories(text_pairs, required):
+    """Mark a parent green when all namespaces add or remove that YAML subtree."""
+    counts = Counter()
+    for old, new in text_pairs:
+        old_paths = container_paths_from_text(old)
+        new_paths = container_paths_from_text(new)
+        for path in old_paths - new_paths:
+            counts[(path, "removed")] += 1
+        for path in new_paths - old_paths:
+            counts[(path, "added")] += 1
+    result = {}
+    for (path, _direction), count in counts.items():
+        if count == required:
+            result[path] = "diff-all-namespaces"
+    return result
+
+
 def normalize_event_text(value):
     if value is _OMIT:
         return "<missing>"
@@ -822,6 +862,7 @@ def release_matrix(current, baseline, title, kind="generic"):
                 for path, (old_value, new_value) in diff_events(b[0]["text"], c[0]["text"]).items():
                     signatures[event_signature(path, old_value, new_value)] += 1
         aggregate_expected = aggregate_environment_paths(text_pairs, len(envs))
+        parent_categories = shared_one_sided_parent_categories(text_pairs, len(envs))
         cells = []
         for env in envs:
             c = cg.get((env, logical), [])
@@ -835,6 +876,7 @@ def release_matrix(current, baseline, title, kind="generic"):
             categories = classify_diff_events(old_text, new_text, signatures, len(envs),
                                               unmatched=(base is None or cur is None),
                                               aggregate_expected_paths=aggregate_expected)
+            categories.update(parent_categories)
             compact_diff = hierarchical_diff_html(old_text, new_text, categories)
             full_diff = hierarchical_diff_html(old_text, new_text, categories, show_all=True)
             cells.append(f'<td><pre class="diff-compact">{compact_diff}</pre>'
@@ -875,6 +917,7 @@ def resource_release_matrix(current, baseline, title, raw_env_headers=False):
                 for path, (old_value, new_value) in diff_events(old, new).items():
                     signatures[event_signature(path, old_value, new_value)] += 1
         aggregate_expected = aggregate_environment_paths(text_pairs, len(envs))
+        parent_categories = shared_one_sided_parent_categories(text_pairs, len(envs))
         cells = []
         for env in envs:
             old = bg.get(env, {}).get(workload)
@@ -892,6 +935,7 @@ def resource_release_matrix(current, baseline, title, raw_env_headers=False):
             categories = classify_diff_events(old or "", new or "", signatures, len(envs),
                                               unmatched=(old is None or new is None),
                                               aggregate_expected_paths=aggregate_expected)
+            categories.update(parent_categories)
             compact = hierarchical_diff_html(old or "", new or "", categories)
             full = hierarchical_diff_html(old or "", new or "", categories, show_all=True)
             cells.append(f'<td>{status}'
