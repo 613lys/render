@@ -7,6 +7,13 @@ import generate_recon_report as report
 
 
 class ReconciliationReportTests(unittest.TestCase):
+    def test_namespace_family_uses_ms_and_bi_markers(self):
+        self.assertEqual(report.namespace_family("cshgms3_airflow3-dev-24969"), "msms")
+        self.assertEqual(report.namespace_family("cshgbi2_panda-automation-dev"), "msbic")
+        self.assertEqual(report.namespace_family("cbjvbi4_ops-automation-prod"), "msbic")
+        self.assertEqual(report.namespace_family("msbic-service-prod"), "msbic")
+        self.assertEqual(report.namespace_family("cshg-dev"), "msbic")
+
     def test_build_supports_helm_only_module_and_namespace_filter(self):
         resource = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: worker-config\n"
         with TemporaryDirectory() as tmp:

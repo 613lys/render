@@ -97,6 +97,17 @@ def env_display(label: str):
     return f"{location} · {env.upper()}"
 
 
+def namespace_family(label: str) -> str:
+    """Classify CKS namespace labels by their MS/BI naming marker."""
+    low = str(label).lower()
+    if "bi" in low:
+        return "msbic"
+    if "ms" in low:
+        return "msms"
+    # Backward compatibility for older labels such as cshg-dev.
+    return "msbic"
+
+
 def normalize_name(value: str) -> str:
     value = str(value)
     suffix = Path(value).suffix
@@ -1295,8 +1306,9 @@ def build(input_dir: Path):
     nav.append('<div class="nav-heading">CKS NAMESPACE CONFIG</div>')
     for is_msms, label in ((False, "MSBIC CKS Namespace Config"),
                            (True, "MSMS CKS Namespace Config")):
-        cn = [x for x in current["ns"] if ("-ms-" in x["env"].lower()) == is_msms]
-        bn = [x for x in baseline["ns"] if ("-ms-" in x["env"].lower()) == is_msms]
+        family = "msms" if is_msms else "msbic"
+        cn = [x for x in current["ns"] if namespace_family(x["env"]) == family]
+        bn = [x for x in baseline["ns"] if namespace_family(x["env"]) == family]
         cid = "msms-cks-ns" if is_msms else "msbic-cks-ns"
         ns_release = resource_release_matrix(cn, bn, "GitOps workload (kind / metadata.name)", raw_env_headers=True)
         ns_status = release_status(release_changed(cn, bn, "ns"), ns_release)
@@ -1315,8 +1327,8 @@ def build(input_dir: Path):
         return (f'<div class="namespace-filter-group"><div class="namespace-filter-heading">'
                 f'{html.escape(title)}</div>{options}</div>')
 
-    msbic_envs = [env for env in envs if "-ms-" not in env.lower()]
-    msms_envs = [env for env in envs if "-ms-" in env.lower()]
+    msbic_envs = [env for env in envs if namespace_family(env) == "msbic"]
+    msms_envs = [env for env in envs if namespace_family(env) == "msms"]
     filters = (filter_group("MSBIC CKS NAMESPACE", msbic_envs) +
                filter_group("MSMS CKS NAMESPACE", msms_envs))
     data = {"nav": "".join(nav), "content": "".join(cards), "filters": filters}
