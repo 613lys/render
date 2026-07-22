@@ -1,10 +1,40 @@
 import unittest
 from collections import Counter
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import generate_recon_report as report
 
 
 class ReconciliationReportTests(unittest.TestCase):
+    def test_build_supports_helm_only_module_and_namespace_filter(self):
+        resource = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: worker-config\n"
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for side in ("current", "baseline"):
+                target = root / side / "helm" / "cshg-dev"
+                target.mkdir(parents=True)
+                (target / "helm-only__1.0.0.yaml").write_text(resource, encoding="utf-8")
+            rendered = report.build(root)
+        module_start = rendered.index('<section id="module-helm-only">')
+        module_end = rendered.index("</section>", module_start)
+        module_html = rendered[module_start:module_end]
+        self.assertIn("RELEASE-DIFF · Helm", module_html)
+        self.assertIn("ENV-DIFF · Helm", module_html)
+        self.assertNotIn("App Config", module_html)
+        self.assertIn('class="namespace-filter" value="cshg-dev"', rendered)
+        self.assertNotIn('value="cshg-dev" checked', rendered)
+        self.assertIn('class="namespace-picker-toggle"', rendered)
+        self.assertIn('data-filter-action="all"', rendered)
+        self.assertIn('data-filter-action="none"', rendered)
+        self.assertIn("MSBIC CKS NAMESPACE", rendered)
+        self.assertIn("MSMS CKS NAMESPACE", rendered)
+        self.assertIn('data-env="cshg-dev"', rendered)
+        self.assertIn("CKS NAMESPACE CONFIG", rendered)
+        self.assertIn("MSBIC CKS Namespace Config", rendered)
+        self.assertIn("MSMS CKS Namespace Config", rendered)
+        self.assertNotIn("function normalizeEnvironmentText", rendered)
+
     def test_release_status_has_three_states(self):
         self.assertEqual(report.release_status(False, ""), "none")
         self.assertEqual(
@@ -40,7 +70,7 @@ class ReconciliationReportTests(unittest.TestCase):
         rendered = report.render_yaml(values["cshg-qa"], changed)
         self.assertIn("spec.ports[0].containerPort", changed)
         self.assertIn(
-            '<span class="yaml-diff">    - containerPort: 8081</span>',
+            '<span class="yaml-diff" data-yaml-path="spec.ports[0].containerPort">    - containerPort: 8081</span>',
             rendered,
         )
 
@@ -230,6 +260,9 @@ data:
         self.assertIn(
             '<span class="expected-env-token">panda-automation-dev</span>', rendered
         )
+        self.assertIn('data-diff-key="target"', rendered)
+        self.assertIn('data-normalized-signature="+target: automation"', rendered)
+        self.assertIn('data-env-derived="true"', rendered)
 
     def test_environment_suffix_key_rename_is_expected(self):
         old = "data:\n  application-dev.yaml: enabled\n"

@@ -359,9 +359,17 @@ def hierarchical_diff_html(old, new, categories=None, show_all=False):
             yaml_text = (f"{marker_match.group(1)}{marker_match.group(2)}"
                          if marker_match else text)
             content = (expected_line_html(yaml_text)
-                       if category == "diff-expected-env" else html.escape(yaml_text))
+                       if ENV_TOKEN_PATTERN.search(yaml_text) else html.escape(yaml_text))
+            logical_path = environment_logical_value(path or "__root__")
+            raw_signature = marker + yaml_text
+            normalized_signature = environment_logical_value(raw_signature)
             rows.append(
-                f'<span class="{css}{category_class}">'
+                f'<span class="{css}{category_class}"'
+                f' data-diff-path="{html.escape(path or "__root__", quote=True)}"'
+                f' data-diff-key="{html.escape(logical_path, quote=True)}"'
+                f' data-raw-signature="{html.escape(raw_signature, quote=True)}"'
+                f' data-normalized-signature="{html.escape(normalized_signature, quote=True)}"'
+                f' data-env-derived="{str(raw_signature != normalized_signature).lower()}">'
                 f'<span class="diff-marker">{marker}</span>'
                 f'<span class="diff-yaml">{content}</span></span>'
             )
@@ -814,7 +822,7 @@ def render_yaml(value, changed, categories=False):
 
     def add(line, path, include_children=False):
         cls = "yaml-diff" if is_changed(path, include_children) else "yaml-same"
-        rows.append(f'<span class="{cls}">{html.escape(line)}</span>')
+        rows.append(f'<span class="{cls}" data-yaml-path="{html.escape(path, quote=True)}">{html.escape(line)}</span>')
 
     def walk(node, path="", indent=0):
         pad = " " * indent
@@ -890,7 +898,7 @@ def app_semantic_matrix(items, title):
     head = []
     for env in envs:
         item = parsed[env][0]
-        head.append(f'<th><b>{html.escape(env)}</b>'
+        head.append(f'<th data-env="{html.escape(env, quote=True)}"><b>{html.escape(env)}</b>'
                     f'<small class="file-head">{html.escape(filename_without_version(item))}</small></th>')
     rows, current_category = [], None
     for path in paths:
@@ -902,19 +910,19 @@ def app_semantic_matrix(items, title):
         values = [parsed[e][2].get(path, marker) for e in envs]
         changed = any(v != values[0] for v in values[1:])
         cells = []
-        for value in values:
+        for env, value in zip(envs, values):
             if value is marker:
                 body = '<span class="missing">MISSING</span>'
             else:
                 cls = "field-diff" if changed else "field-same"
                 body = f'<span class="{cls}">{html.escape(scalar_text(value))}</span>'
-            cells.append(f'<td class="field-value"><div class="collapse-box field-collapse">'
+            cells.append(f'<td class="field-value" data-env="{html.escape(env, quote=True)}"><div class="collapse-box field-collapse">'
                          f'<div class="collapsible-content">{body}</div></div></td>')
-        rows.append(f'<tr class="{"diff-row" if changed else "same-row"}"><th class="field-path">{html.escape(path)}</th>{"".join(cells)}</tr>')
+        rows.append(f'<tr class="{"diff-row" if changed else "same-row"}" data-field-path="{html.escape(path, quote=True)}"><th class="field-path">{html.escape(path)}</th>{"".join(cells)}</tr>')
     raw_cells = []
     for env in envs:
         item, value, _ = parsed[env]
-        raw_cells.append(f'<td><details><summary>View original YAML</summary>'
+        raw_cells.append(f'<td data-env="{html.escape(env, quote=True)}"><details><summary>View original YAML</summary>'
                          f'<div class="orig-file">{html.escape(item["path"].name)}</div>'
                          f'<div class="collapse-box"><pre class="collapsible-content">{render_yaml(value, set())}</pre>'
                          f'</div></details></td>')
@@ -982,7 +990,7 @@ def env_matrix(items, kind, title):
             docs = yaml_docs(item["text"])
             matrix[key][item["env"]] = docs[0] if docs else {"raw": item["text"]}
             filenames[(key, item["env"])] = item["path"].name
-    head = "".join(f'<th><b>{html.escape(e)}</b></th>' for e in envs)
+    head = "".join(f'<th data-env="{html.escape(e, quote=True)}"><b>{html.escape(e)}</b></th>' for e in envs)
     rows = []
     for key, values in sorted(matrix.items()):
         changed = differences({e: values.get(e, {"__missing__": True}) for e in envs})
@@ -995,7 +1003,7 @@ def env_matrix(items, kind, title):
             file_label = ""
             if kind == "app_config" and (key, env) in filenames:
                 file_label = f'<div class="orig-file">Config file · {html.escape(filenames[(key, env)])}</div>'
-            cells.append(f'<td>{file_label}<div class="collapse-box">'
+            cells.append(f'<td data-env="{html.escape(env, quote=True)}">{file_label}<div class="collapse-box">'
                          f'<pre class="collapsible-content env-resource-yaml">{body}</pre></div></td>')
         row_definition = html.escape(key)
         if kind == "app_config":
@@ -1057,11 +1065,11 @@ def release_matrix(current, baseline, title, kind="generic"):
             item = next((x for x in current if x["env"] == env), None)
             item = item or next((x for x in baseline if x["env"] == env), None)
             file_name = filename_without_version(item) if item else "missing"
-            head_cells.append(f'<th><b>{html.escape(env)}</b>'
+            head_cells.append(f'<th data-env="{html.escape(env, quote=True)}"><b>{html.escape(env)}</b>'
                               f'<small class="file-head">{html.escape(file_name)}</small></th>')
         head = "".join(head_cells)
     else:
-        head = "".join(f"<th>{html.escape(e)}</th>" for e in envs)
+        head = "".join(f'<th data-env="{html.escape(e, quote=True)}">{html.escape(e)}</th>' for e in envs)
     rows = []
     for logical in logicals:
         signatures = Counter()
@@ -1093,7 +1101,7 @@ def release_matrix(current, baseline, title, kind="generic"):
             categories.update(parent_categories)
             compact_diff = hierarchical_diff_html(old_text, new_text, categories)
             full_diff = hierarchical_diff_html(old_text, new_text, categories, show_all=True)
-            cells.append(f'<td><pre class="diff-compact">{compact_diff}</pre>'
+            cells.append(f'<td data-env="{html.escape(env, quote=True)}"><pre class="diff-compact">{compact_diff}</pre>'
                          f'<pre class="diff-full hidden">{full_diff}</pre></td>')
         rows.append(f'<tr><th class="row-title">{html.escape(logical)}</th>{"".join(cells)}</tr>')
     return (f'<div class="toolbar release-toolbar"><button class="release-view-toggle" '
@@ -1118,7 +1126,7 @@ def resource_release_matrix(current, baseline, title, raw_env_headers=False):
     cg, bg = collect(current), collect(baseline)
     workloads = sorted({key for resources in cg.values() for key in resources} |
                        {key for resources in bg.values() for key in resources})
-    head = "".join(f'<th><b>{html.escape(env)}</b></th>' for env in envs)
+    head = "".join(f'<th data-env="{html.escape(env, quote=True)}"><b>{html.escape(env)}</b></th>' for env in envs)
     rows = []
     for workload in workloads:
         signatures = Counter()
@@ -1138,7 +1146,7 @@ def resource_release_matrix(current, baseline, title, raw_env_headers=False):
             old = bg.get(env, {}).get(workload)
             new = cg.get(env, {}).get(workload)
             if old is None and new is None:
-                cells.append('<td class="absent-workload"></td>')
+                cells.append(f'<td class="absent-workload" data-env="{html.escape(env, quote=True)}"></td>')
                 continue
             if old is None:
                 status = '<div class="workload-status added-status">Added in current</div>'
@@ -1153,7 +1161,7 @@ def resource_release_matrix(current, baseline, title, raw_env_headers=False):
             categories.update(parent_categories)
             compact = hierarchical_diff_html(old or "", new or "", categories)
             full = hierarchical_diff_html(old or "", new or "", categories, show_all=True)
-            cells.append(f'<td>{status}'
+            cells.append(f'<td data-env="{html.escape(env, quote=True)}">{status}'
                          f'<div class="collapse-box diff-compact"><pre class="collapsible-content">{compact}</pre></div>'
                          f'<div class="collapse-box diff-full hidden"><pre class="collapsible-content">{full}</pre></div></td>')
         rows.append(f'<tr><th class="row-title workload-title">{html.escape(workload)}</th>'
@@ -1180,14 +1188,15 @@ def tabs(sections, extra_class=""):
     for i, section in enumerate(sections):
         label, body = section[0], section[1]
         status = section[2] if len(section) > 2 else None
+        release_attr = ' data-release="true"' if status is not None else ""
         active = " active" if i == 0 else ""
         badge = ""
         if status is not None:
             label_text, cls = release_status_meta(status)
             badge = f'<span class="tab-diff-badge {cls}">{label_text}</span>'
-        buttons.append(f'<button class="tab{active}" data-index="{i}">'
+        buttons.append(f'<button class="tab{active}" data-index="{i}"{release_attr}>'
                        f'{html.escape(label)}{badge}</button>')
-        bodies.append(f'<div class="tab-pane{active}" data-index="{i}">{body}</div>')
+        bodies.append(f'<div class="tab-pane{active}" data-index="{i}"{release_attr}>{body}</div>')
     return f'<div class="tab-group {extra_class}"><div class="tabs">{"".join(buttons)}</div>{"".join(bodies)}</div>'
 
 
@@ -1225,7 +1234,7 @@ def release_status(changed, rendered_release):
 def release_status_meta(status):
     return {
         "none": ("No Diff", "no-diff"),
-        "expected": ("All Expected Diff", "expected-diff"),
+        "expected": ("Expected", "expected-diff"),
         "diff": ("Diff", "has-diff"),
     }[status]
 
@@ -1247,7 +1256,8 @@ def nav_item(cid, label, status):
 def build(input_dir: Path):
     current = {k: scan(input_dir, "current", k) for k in ("helm", "app_config", "ns")}
     baseline = {k: scan(input_dir, "baseline", k) for k in ("helm", "app_config", "ns")}
-    modules = sorted({x["module"] for x in current["app_config"] + baseline["app_config"]})
+    modules = sorted({x["module"] for x in (current["app_config"] + baseline["app_config"]
+                                             + current["helm"] + baseline["helm"])})
     cards, nav = [], ['<div class="nav-heading">Modules</div>']
     for module in modules:
         cid = "module-" + re.sub(r"\W+", "-", module)
@@ -1256,33 +1266,63 @@ def build(input_dir: Path):
         # Mock convention: Helm chart and module share their name.
         ch = [x for x in current["helm"] if x["name"] == module]
         bh = [x for x in baseline["helm"] if x["name"] == module]
-        helm_release = resource_release_matrix(ch, bh, "Workload (kind / metadata.name)")
-        app_release = app_release_config_tabs(cc, bb)
-        helm_status = release_status(release_changed(ch, bh, "helm"), helm_release)
-        app_status = release_status(release_changed(cc, bb, "app_config"), app_release)
-        nav.append(nav_item(cid, module, combined_release_status(helm_status, app_status)))
-        sections = [
-            ("RELEASE-DIFF · Helm", version_bar(ch, bh) + helm_release, helm_status),
-            ("RELEASE-DIFF · App Config", version_bar(cc, bb) + app_release, app_status),
-            ("ENV-DIFF · Helm", version_bar(ch, bh) + env_matrix(ch, "helm", "Workload / resource")),
-            ("ENV-DIFF · App Config", version_bar(cc, bb) + app_env_config_tabs(cc)),
-        ]
+        release_sections, env_sections, statuses = [], [], []
+        if ch or bh:
+            helm_release = resource_release_matrix(ch, bh, "Workload (kind / metadata.name)")
+            helm_status = release_status(release_changed(ch, bh, "helm"), helm_release)
+            statuses.append(helm_status)
+            release_sections.append(
+                ("RELEASE-DIFF · Helm", version_bar(ch, bh) + helm_release, helm_status)
+            )
+            env_sections.append(
+                ("ENV-DIFF · Helm", version_bar(ch, bh) + env_matrix(ch, "helm", "Workload / resource"))
+            )
+        if cc or bb:
+            app_release = app_release_config_tabs(cc, bb)
+            app_status = release_status(release_changed(cc, bb, "app_config"), app_release)
+            statuses.append(app_status)
+            release_sections.append(
+                ("RELEASE-DIFF · App Config", version_bar(cc, bb) + app_release, app_status)
+            )
+            env_sections.append(
+                ("ENV-DIFF · App Config", version_bar(cc, bb) + app_env_config_tabs(cc))
+            )
+        sections = release_sections + env_sections
+        nav.append(nav_item(cid, module, combined_release_status(*statuses)))
         cards.append(f'<section id="{cid}"><h2>Application · {html.escape(module)}</h2>'
                      f'{tabs(sections)}</section>')
 
-    nav.append('<div class="nav-heading">Namespaces</div>')
-    for airflow, label in ((False, "Service Namespaces"), (True, "Airflow Namespaces")):
-        cn = [x for x in current["ns"] if ("ms" in x["env"].lower()) == airflow]
-        bn = [x for x in baseline["ns"] if ("ms" in x["env"].lower()) == airflow]
-        cid = "airflow-ns" if airflow else "service-ns"
+    nav.append('<div class="nav-heading">CKS NAMESPACE CONFIG</div>')
+    for is_msms, label in ((False, "MSBIC CKS Namespace Config"),
+                           (True, "MSMS CKS Namespace Config")):
+        cn = [x for x in current["ns"] if ("-ms-" in x["env"].lower()) == is_msms]
+        bn = [x for x in baseline["ns"] if ("-ms-" in x["env"].lower()) == is_msms]
+        cid = "msms-cks-ns" if is_msms else "msbic-cks-ns"
         ns_release = resource_release_matrix(cn, bn, "GitOps workload (kind / metadata.name)", raw_env_headers=True)
         ns_status = release_status(release_changed(cn, bn, "ns"), ns_release)
         nav.append(nav_item(cid, label, ns_status))
         cards.append(f'<section id="{cid}"><h2>{label}</h2>{version_bar(cn, bn)}'
                      f'{tabs([("RELEASE-DIFF", ns_release, ns_status), ("ENV-DIFF", env_matrix(cn, "ns", "Namespace resource"))])}</section>')
 
-    data = {"nav": "".join(nav), "content": "".join(cards)}
-    return TEMPLATE.replace("__NAV__", data["nav"]).replace("__CONTENT__", data["content"])
+    envs = sorted({x["env"] for kind in current for x in current[kind]} |
+                  {x["env"] for kind in baseline for x in baseline[kind]}, key=env_sort)
+    def filter_group(title, group_envs):
+        options = "".join(
+            f'<label><input type="checkbox" class="namespace-filter" value="{html.escape(env, quote=True)}"'
+            f'{"" if (env.startswith("cshg") and env.endswith("dev")) else " checked"}><span>{html.escape(env)}</span></label>'
+            for env in group_envs
+        )
+        return (f'<div class="namespace-filter-group"><div class="namespace-filter-heading">'
+                f'{html.escape(title)}</div>{options}</div>')
+
+    msbic_envs = [env for env in envs if "-ms-" not in env.lower()]
+    msms_envs = [env for env in envs if "-ms-" in env.lower()]
+    filters = (filter_group("MSBIC CKS NAMESPACE", msbic_envs) +
+               filter_group("MSMS CKS NAMESPACE", msms_envs))
+    data = {"nav": "".join(nav), "content": "".join(cards), "filters": filters}
+    return (TEMPLATE.replace("__NAV__", data["nav"])
+            .replace("__CONTENT__", data["content"])
+            .replace("__FILTER__", data["filters"]))
 
 
 TEMPLATE = """<!doctype html>
@@ -1290,8 +1330,8 @@ TEMPLATE = """<!doctype html>
 <title>Reconciliation Report</title><style>
 :root{--bg:#f4f7fb;--panel:#fff;--line:#d9e2ef;--text:#1f2a3d;--muted:#66758c;--cyan:#087f8c;--red:#c9364f;--green:#177245;--yellow:#9b6300}
 *{box-sizing:border-box}html,body{height:100%;overflow:hidden}body{margin:0;background:var(--bg);color:var(--text);font:13px Inter,Segoe UI,sans-serif}
-header{position:fixed;inset:0 0 auto 0;height:56px;z-index:5;background:#fffffff2;border-bottom:1px solid var(--line);padding:14px 18px;box-shadow:0 2px 10px #25385810}
-h1{margin:0;font-size:18px}aside{position:fixed;top:56px;bottom:0;width:210px;padding:14px;border-right:1px solid var(--line);background:#fff;overflow:auto}
+header{position:fixed;inset:0 0 auto 0;height:56px;z-index:5;background:#fffffff2;border-bottom:1px solid var(--line);padding:9px 18px;box-shadow:0 2px 10px #25385810;display:flex;align-items:center;gap:20px}
+h1{margin:0;font-size:18px;white-space:nowrap}.namespace-picker{position:relative;margin-left:auto}.namespace-picker-toggle{display:flex;align-items:center;gap:7px;min-width:210px;padding:8px 12px;border:1px solid #cbd9e8;border-radius:7px;background:#edf4fb;color:#2b5873;cursor:pointer;font-size:12px}.namespace-picker-toggle:hover{background:#e4f0f8}.namespace-picker-icon{color:#07869a;font-size:13px}.namespace-picker-count{margin-left:auto;padding:1px 8px;border-radius:10px;background:#087f8c;color:#fff;font-weight:800}.namespace-picker-caret{margin-left:2px;color:#71849b;font-size:9px}.namespace-picker-menu{position:absolute;top:calc(100% + 6px);right:0;z-index:20;width:350px;max-height:calc(100vh - 78px);overflow:auto;padding:10px;background:#fff;border:1px solid #cad8e8;border-radius:8px;box-shadow:0 8px 22px #263b5228}.namespace-picker-actions{display:flex;gap:10px;padding-bottom:9px;border-bottom:1px solid #dce5ef}.namespace-picker-actions button{padding:5px 10px;border:1px solid #d1ddeb;border-radius:5px;background:#edf3f9;color:#536a82;cursor:pointer}.namespace-picker-actions button:hover{background:#e2edf6}.namespace-filter-group{padding-top:9px}.namespace-filter-heading{margin-bottom:4px;padding:0 8px 4px;border-bottom:1px solid #e2e9f1;color:#34465d;font-size:10px;font-weight:900;letter-spacing:.04em}.namespace-filter-group label{display:flex;align-items:center;gap:8px;padding:4px 9px;color:#34445d;font:11px/1.25 Consolas,"Cascadia Mono",monospace;cursor:pointer}.namespace-filter-group label:hover{background:#edf6fb;border-radius:4px}.namespace-filter-group input{margin:0;accent-color:#087f8c}.namespace-filter-group span{overflow-wrap:anywhere}aside{position:fixed;top:56px;bottom:0;width:210px;padding:14px;border-right:1px solid var(--line);background:#fff;overflow:auto}
 aside a{display:flex;align-items:center;justify-content:space-between;gap:7px;color:var(--muted);padding:8px 9px;border-radius:6px;text-decoration:none;border-left:3px solid transparent;font-size:12px}aside a:hover{background:#eaf3fb;color:#174a68}aside a.active{background:#dceef7;color:#0b5f7b;border-left-color:#087f8c;font-weight:700}.diff-badge{flex:none;padding:2px 5px;border-radius:9px;font-size:8px;font-weight:800;letter-spacing:.03em}.diff-badge.has-diff{color:#a62239;background:#ffe1e6}.diff-badge.expected-diff{color:#086b9c;background:#d9effa}.diff-badge.no-diff{color:#17633d;background:#dcf5e6}
 .nav-heading{margin:14px 6px 6px;padding-bottom:6px;border-bottom:1px solid #dce5ef;color:#32445d;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.nav-heading:first-child{margin-top:0}
 main{position:fixed;top:56px;right:0;bottom:0;left:210px;padding:14px;overflow:hidden}main>section{display:none;height:100%;min-height:0;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}main>section.active-view{display:flex;flex-direction:column}
@@ -1312,12 +1352,12 @@ th small{display:block;color:var(--yellow);margin-top:5px;font-weight:400}td{bac
 .release td pre{margin:4px 6px;padding:6px 8px;font-size:11px;line-height:1.28}.release .add,.release .del,.release .hunk,.release .diff-file,.release .ctx{display:inline;margin:0;padding:0;line-height:1.28}
 .release-toolbar{display:flex;align-items:center;gap:10px}.release-toolbar span{font-size:12px}.release-view-toggle{border:1px solid #2c7699;background:#edf7fb;color:#1d607f;border-radius:6px;padding:7px 11px;cursor:pointer}.release-view-toggle:hover{background:#dceff7}.hidden{display:none!important}
 .workload-title{font-weight:700}.workload-status{margin:6px 7px 0;padding:4px 8px;font-size:11px;font-weight:700;border-left:3px solid}.added-status{color:#08733f;border-color:#08733f}.removed-status{color:#c12640;border-color:#c12640}.absent-workload{min-height:36px;background:#fafbfd}
-.diff-fragment{display:inline-grid!important;vertical-align:top;grid-template-columns:12px minmax(0,1fr);width:100%;background:transparent!important}.diff-marker{grid-column:1;text-align:center;font-weight:800;border-radius:2px 0 0 2px}.diff-yaml{grid-column:2;white-space:pre-wrap;min-width:0;border-radius:0 2px 2px 0}.diff-compact .ctx,.diff-full .ctx{display:inline;padding-left:12px}.diff-fragment.diff-all-namespaces>.diff-marker,.diff-fragment.diff-all-namespaces>.diff-yaml{background:#e4f6ea}.diff-fragment.diff-expected-env>.diff-marker{background:#e4f6ea}.diff-fragment.diff-expected-env>.diff-yaml{background:transparent}.diff-fragment.diff-actual>.diff-marker,.diff-fragment.diff-actual>.diff-yaml{background:#ffe7eb}.expected-common{background:#e4f6ea}.expected-env-token{background:#bfe3f7;border-radius:2px;font-weight:800}.diff-legend{display:flex;flex:none;gap:7px;padding:4px 7px;font-size:9px;color:#52637b}.diff-legend span{padding:2px 6px;border-radius:8px}.legend-all{background:#dff3e6}.legend-env{background:#bfe3f7;color:#086b9c}.legend-actual{background:#ffe0e5}
+.diff-fragment{display:inline-grid!important;vertical-align:top;grid-template-columns:12px minmax(0,1fr);width:100%;background:transparent!important}.diff-marker{grid-column:1;text-align:center;font-weight:800;border-radius:2px 0 0 2px}.diff-yaml{grid-column:2;white-space:pre-wrap;min-width:0;border-radius:0 2px 2px 0}.diff-compact .ctx,.diff-full .ctx{display:inline;padding-left:12px}.diff-fragment.diff-all-namespaces>.diff-marker,.diff-fragment.diff-all-namespaces>.diff-yaml{background:#e4f6ea}.diff-fragment.diff-expected-env>.diff-marker,.diff-fragment.diff-expected-env>.diff-yaml{background:#e4f6ea}.diff-fragment.diff-actual>.diff-marker,.diff-fragment.diff-actual>.diff-yaml{background:#ffe7eb}.diff-fragment.diff-expected-env .expected-common{background:transparent}.diff-fragment.diff-expected-env .expected-env-token{background:#bfe3f7;border-radius:2px;font-weight:800}.diff-legend{display:flex;flex:none;gap:7px;padding:4px 7px;font-size:9px;color:#52637b}.diff-legend span{padding:2px 6px;border-radius:8px}.legend-all{background:#dff3e6}.legend-env{background:#bfe3f7;color:#086b9c}.legend-actual{background:#ffe0e5}
 .collapse-box{position:relative}.collapsible-content{max-height:280px;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable}.field-collapse .collapsible-content{max-height:92px;white-space:pre-wrap}.collapsible-content::-webkit-scrollbar{width:7px}.collapsible-content::-webkit-scrollbar-thumb{background:#b8c8d5;border-radius:6px}.collapsible-content::-webkit-scrollbar-track{background:#edf2f6}
 .release-version-bar{display:flex;flex:none;align-items:center;gap:10px;padding:7px 12px;background:#f7fafc;border-bottom:1px solid var(--line)}.release-version-bar>div:not(.version-arrow){display:flex;align-items:center;gap:6px}.release-version-bar span{color:var(--muted);font-size:10px}.release-version-bar b{color:#174f6b;font:600 11px Consolas,monospace}.version-arrow{color:#6f8198;font-size:14px}
-.only-differences .same-row{display:none}@media(max-width:800px){aside{display:none}main{top:56px;right:0;bottom:0;left:0;margin:0;padding:8px}}
+.namespace-hidden{display:none!important}.only-differences .same-row{display:none}@media(max-width:800px){aside{display:none}main{top:56px;right:0;bottom:0;left:0;margin:0;padding:8px}.namespace-picker-toggle{min-width:auto}.namespace-picker-label{display:none}.namespace-picker-menu{right:0;width:min(350px,calc(100vw - 16px))}}
 .only-differences .env-resource-yaml .yaml-same{display:none}
-</style></head><body><header><h1>Release & Environment Reconciliation</h1></header>
+</style></head><body><header><h1>Release & Environment Reconciliation</h1><div class="namespace-picker"><button type="button" class="namespace-picker-toggle" aria-expanded="false"><span class="namespace-picker-icon">◇</span><span class="namespace-picker-label">Namespaces</span><span class="namespace-picker-count">0/0</span><span class="namespace-picker-caret">▼</span></button><div class="namespace-picker-menu hidden"><div class="namespace-picker-actions"><button type="button" data-filter-action="all">Select All</button><button type="button" data-filter-action="none">Deselect All</button></div>__FILTER__</div></div></header>
 <aside>__NAV__</aside><main>__CONTENT__</main>
 <script>
 document.querySelectorAll('.tab-group').forEach(group=>{
@@ -1336,6 +1376,132 @@ document.querySelectorAll('.release-view-toggle').forEach(btn=>btn.onclick=()=>{
  btn.dataset.showAll=String(showAll);btn.textContent=showAll?'Show changed lines only':'Show all lines';
  const hint=btn.nextElementSibling;if(hint)hint.textContent=showAll?'All unchanged and changed lines are shown':'Only changed lines are currently shown';
 });
+const filterInputs=[...document.querySelectorAll('.namespace-filter')];
+const namespacePicker=document.querySelector('.namespace-picker');
+const namespaceToggle=document.querySelector('.namespace-picker-toggle');
+const namespaceMenu=document.querySelector('.namespace-picker-menu');
+namespaceToggle?.addEventListener('click',event=>{
+ event.stopPropagation();
+ const opening=namespaceMenu.classList.contains('hidden');
+ namespaceMenu.classList.toggle('hidden',!opening);
+ namespaceToggle.setAttribute('aria-expanded',String(opening));
+});
+namespaceMenu?.addEventListener('click',event=>event.stopPropagation());
+document.addEventListener('click',()=>{
+ namespaceMenu?.classList.add('hidden');namespaceToggle?.setAttribute('aria-expanded','false');
+});
+document.querySelectorAll('[data-filter-action]').forEach(button=>button.addEventListener('click',()=>{
+ const checked=button.dataset.filterAction==='all';
+ filterInputs.forEach(input=>input.checked=checked);
+ applyNamespaceFilter();
+}));
+function setDiffClass(fragment,classification){
+ fragment.classList.remove('diff-all-namespaces','diff-expected-env','diff-actual');
+ fragment.classList.add(classification);
+}
+function reclassifyReleaseTable(table,selected){
+ const rows=[...table.tBodies].flatMap(body=>[...body.rows]);
+ rows.forEach(row=>{
+   const cells=[...row.querySelectorAll(':scope > td[data-env]')]
+     .filter(cell=>selected.has(cell.dataset.env));
+   const paths=new Set(cells.flatMap(cell=>
+     [...cell.querySelectorAll('.diff-compact .diff-fragment[data-diff-path]')]
+       .map(fragment=>fragment.dataset.diffKey)));
+   paths.forEach(path=>{
+     const matchingByCell=cells.map(cell=>[...cell.querySelectorAll('.diff-compact .diff-fragment[data-diff-key]')]
+       .filter(fragment=>fragment.dataset.diffKey===path));
+     const signatures=matchingByCell.map(fragments=>fragments
+       .map(fragment=>fragment.dataset.rawSignature)
+       .join('\\n'));
+     const normalizedSignatures=matchingByCell.map(fragments=>fragments
+       .map(fragment=>fragment.dataset.normalizedSignature)
+       .join('\\n'));
+     const complete=signatures.length>0&&signatures.every(Boolean);
+     const exact=complete&&new Set(signatures).size===1;
+     const normalized=complete&&new Set(normalizedSignatures).size===1;
+     const hasEnv=matchingByCell.some(fragments=>
+       fragments.some(fragment=>fragment.dataset.envDerived==='true'));
+     const classification=exact?'diff-all-namespaces':
+       (normalized&&hasEnv?'diff-expected-env':'diff-actual');
+     cells.forEach(cell=>cell.querySelectorAll('.diff-fragment[data-diff-path]').forEach(fragment=>{
+       if(fragment.dataset.diffKey===path)setDiffClass(fragment,classification);
+     }));
+   });
+ });
+}
+function setBadge(badge,status){
+ if(!badge)return;
+ badge.classList.remove('no-diff','expected-diff','has-diff');
+ const meta={none:['No Diff','no-diff'],expected:['Expected','expected-diff'],diff:['Diff','has-diff']}[status];
+ badge.textContent=meta[0];badge.classList.add(meta[1]);
+}
+function refreshReleaseStatus(selected){
+ document.querySelectorAll('.tab-pane[data-release="true"]').forEach(pane=>{
+   pane.querySelectorAll('table.release').forEach(table=>reclassifyReleaseTable(table,selected));
+   const visibleFragments=[...pane.querySelectorAll('.diff-compact .diff-fragment')]
+     .filter(fragment=>selected.has(fragment.closest('td[data-env]')?.dataset.env));
+   const status=!visibleFragments.length?'none':
+     (visibleFragments.some(fragment=>fragment.classList.contains('diff-actual'))?'diff':'expected');
+   pane.dataset.releaseStatus=status;
+   const group=pane.parentElement;
+   const button=group.querySelector(`:scope > .tabs > .tab[data-index="${pane.dataset.index}"]`);
+   setBadge(button?.querySelector('.tab-diff-badge'),status);
+ });
+ document.querySelectorAll('main > section').forEach(section=>{
+   const statuses=[...section.querySelectorAll('.tab-pane[data-release="true"]')]
+     .map(pane=>pane.dataset.releaseStatus);
+   const status=statuses.includes('diff')?'diff':(statuses.includes('expected')?'expected':'none');
+   const link=document.querySelector(`aside a[data-target="${section.id}"]`);
+   setBadge(link?.querySelector('.diff-badge'),status);
+ });
+}
+function refreshEnvironmentDiff(selected){
+ document.querySelectorAll('table.env-matrix').forEach(table=>{
+   table.querySelectorAll('tbody tr[data-field-path]').forEach(row=>{
+     const cells=[...row.querySelectorAll(':scope > td[data-env]')]
+       .filter(cell=>selected.has(cell.dataset.env));
+     const values=cells.map(cell=>cell.textContent.trim());
+     const changed=values.length>1&&new Set(values).size>1;
+     row.classList.toggle('diff-row',changed);row.classList.toggle('same-row',!changed);
+     cells.forEach(cell=>cell.querySelectorAll('.field-diff,.field-same').forEach(value=>{
+       value.classList.toggle('field-diff',changed);value.classList.toggle('field-same',!changed);
+     }));
+   });
+   table.querySelectorAll('tbody tr:not([data-field-path])').forEach(row=>{
+     const cells=[...row.querySelectorAll(':scope > td[data-env]')]
+       .filter(cell=>selected.has(cell.dataset.env));
+     if(!row.querySelector('td[data-env]'))return;
+     const paths=new Set(cells.flatMap(cell=>[...cell.querySelectorAll('[data-yaml-path]')]
+       .map(line=>line.dataset.yamlPath)));
+     const directlyChanged=new Set();
+     paths.forEach(path=>{
+       const values=cells.map(cell=>[...cell.querySelectorAll('[data-yaml-path]')]
+         .filter(line=>line.dataset.yamlPath===path).map(line=>line.textContent).join('\\n')||'<missing>');
+       if(values.length>1&&new Set(values).size>1)directlyChanged.add(path);
+     });
+     const changedPaths=new Set([...paths].filter(path=>[...directlyChanged]
+       .some(changed=>changed===path||changed.startsWith(path+'.')||changed.startsWith(path+'['))));
+     cells.forEach(cell=>cell.querySelectorAll('[data-yaml-path]').forEach(line=>{
+       const changed=changedPaths.has(line.dataset.yamlPath);
+       line.classList.toggle('yaml-diff',changed);line.classList.toggle('yaml-same',!changed);
+     }));
+     row.classList.toggle('diff-row',changedPaths.size>0);
+     row.classList.toggle('same-row',changedPaths.size===0);
+   });
+ });
+}
+function applyNamespaceFilter(){
+ const selected=new Set(filterInputs.filter(input=>input.checked).map(input=>input.value));
+ const count=document.querySelector('.namespace-picker-count');
+ if(count)count.textContent=`${selected.size}/${filterInputs.length}`;
+ document.querySelectorAll('[data-env]').forEach(element=>{
+   if(element.classList.contains('namespace-filter'))return;
+   element.classList.toggle('namespace-hidden',!selected.has(element.dataset.env));
+ });
+ refreshReleaseStatus(selected);
+ refreshEnvironmentDiff(selected);
+}
+filterInputs.forEach(input=>input.addEventListener('change',applyNamespaceFilter));
 const navLinks=[...document.querySelectorAll('aside a[data-target]')];
 const views=[...document.querySelectorAll('main > section')];
 function selectView(target,updateHash=true){
@@ -1349,6 +1515,7 @@ navLinks.forEach(link=>link.addEventListener('click',event=>{
 }));
 window.addEventListener('hashchange',()=>selectView(location.hash.slice(1),false));
 selectView(location.hash.slice(1)||navLinks[0]?.dataset.target,false);
+applyNamespaceFilter();
 </script></body></html>"""
 
 

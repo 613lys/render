@@ -553,6 +553,19 @@ def main() -> None:
             write(f"baseline/app_config/{label}/{module}/routing/{routes_name}__{app_baseline_version}.yaml",
                   baseline_routes)
 
+    # A Helm-only application proves the report does not require App Config
+    # files in order to expose a module and its two Helm comparison tabs.
+    for label, env, _version, replicas, _image, port, memory, feature, suffix in envs:
+        module = "worker"
+        current_version = "1.1.0"
+        baseline_version = "1.0.0"
+        current_helm = module_helm(module, env, current_version, replicas, current_version,
+                                   port + 40, memory, feature, suffix)
+        baseline_helm = module_helm(module, env, baseline_version, replicas, baseline_version,
+                                    port + 40, memory, feature, suffix, baseline=True)
+        write(f"current/helm/{label}/{module}__{current_version}.yaml", current_helm)
+        write(f"baseline/helm/{label}/{module}__{baseline_version}.yaml", baseline_helm)
+
     ns_envs = [
         ("cshg-dev", "dev", "ns-4.2.0", "8"),
         ("cshg-qa", "qa", "ns-4.2.0", "10"),
