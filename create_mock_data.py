@@ -99,6 +99,8 @@ def app_config(env: str, db: str, pool: int, kafka: str, timeout: int,
     previous_env = {"dev": "qa", "qa": "prod", "prod": "dev"}.get(env, "qa")
     environment_alias = f"service-{previous_env}" if baseline else f"service-{env}"
     review_threshold = 10 if baseline else {"dev": 12, "qa": 15, "prod": 20}.get(env, 12)
+    notification_channels = ["email", "sms"] + (["pager"] if env == "prod" else [])
+    channels_yaml = "\n".join(f"    - {channel}" for channel in notification_channels)
     return f"""
 spring:
   application:
@@ -122,6 +124,9 @@ features:
 custom-unmapped:
   owner: platform
   note: "must remain visible"
+notifications:
+  channels:
+{channels_yaml}
 release-demo:
   shared-mode: {shared_mode}
   environment-alias: {environment_alias}
@@ -168,6 +173,21 @@ def add_pki_deployment_scenario(text: str, env: str, baseline: bool) -> str:
     image = ("edge-prod.ai.ms.com.cn/devops-docker-release/ops-automation/"
              f"china-ops-central:{'2026.06.18-1' if baseline else '2026.07.08-6'}")
     text = re.sub(r"(?m)^          image: .+$", f"          image: {image}", text, count=1)
+    script = ("/base-image/scripts/af_token_update_to_vault.sh "
+              f"{'-c' if baseline else '-n msbic/core -c'} /pki/proid-ops-auto "
+              f"-i 24969-{env}-ops_auto -k password_or_token-shg "
+              f"-p secret/24969/{env}/k8s/artifactory -a /pki/ca-trust/cacerts.pem "
+              f"-f https://edge-{env}-mtls.ai.ms.com.cn")
+    text = text.replace(
+        f"          image: {image}\n",
+        f"          image: {image}\n"
+        "          command:\n"
+        "            - /bin/sh\n"
+        "            - -c\n"
+        "            - |\n"
+        f"              {script}\n",
+        1,
+    )
     if baseline:
         text = text.replace(
             "          env:\n",
@@ -323,6 +343,7 @@ metadata:
   name: krb5-config
   namespace: {namespace_alias}
 data:
+  EMPTY_VALUE:
   krb5.conf: |-
 {indented}
   routing.conf: |-

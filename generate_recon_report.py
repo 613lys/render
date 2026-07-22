@@ -153,7 +153,8 @@ def resource_key(doc: dict):
 def normalize_configmap(doc):
     if doc.get("kind") == "ConfigMap" and isinstance(doc.get("data"), dict):
         doc = json.loads(json.dumps(doc))
-        doc["data"] = {normalize_name(k): v for k, v in doc["data"].items()}
+        doc["data"] = {normalize_name(k): "" if v is None else v
+                       for k, v in doc["data"].items()}
     return doc
 
 
@@ -198,18 +199,22 @@ def semantic_text(text):
                      for path, value in sorted(semantic_fields_from_text(text).items()))
 
 
-def expand_embedded_yaml(node):
+def expand_embedded_yaml(node, empty_nulls=False):
     if isinstance(node, dict):
-        return {key: expand_embedded_yaml(value) for key, value in node.items()}
+        is_configmap = node.get("kind") == "ConfigMap"
+        return {key: expand_embedded_yaml(value, empty_nulls or (is_configmap and key == "data"))
+                for key, value in node.items()}
     if isinstance(node, list):
-        return [expand_embedded_yaml(value) for value in node]
+        return [expand_embedded_yaml(value, empty_nulls) for value in node]
     if isinstance(node, str) and "\n" in node:
         try:
             parsed = yaml.safe_load(node)
         except yaml.YAMLError:
             parsed = None
         if isinstance(parsed, (dict, list)):
-            return expand_embedded_yaml(parsed)
+            return expand_embedded_yaml(parsed, empty_nulls)
+    if node is None and empty_nulls:
+        return ""
     return node
 
 
@@ -336,13 +341,15 @@ def hierarchical_diff_texts(old, new):
     return dump(old_changed), dump(new_changed), dump(old_value), dump(new_value)
 
 
-def hierarchical_diff_html(old, new, categories=None, show_all=False):
+def hierarchical_diff_html(old, new, categories=None, show_all=False,
+                           intrinsic_expected=None):
     old_docs, new_docs = yaml_docs(old), yaml_docs(new)
     left = expand_embedded_yaml(old_docs[0]) if old_docs else _OMIT
     right = expand_embedded_yaml(new_docs[0]) if new_docs else _OMIT
     rows = []
 
     categories = categories or {}
+    intrinsic_expected = intrinsic_expected or set()
 
     def expected_line_html(text):
         pieces, cursor = [], 0
@@ -352,6 +359,13 @@ def hierarchical_diff_html(old, new, categories=None, show_all=False):
             cursor = match.end()
         pieces.append(f'<span class="expected-common">{html.escape(text[cursor:])}</span>')
         return "".join(pieces)
+
+    def expected_image_line_html(text):
+        separator = text.rfind(":")
+        if separator <= text.rfind("/"):
+            return html.escape(text)
+        return (f'<span class="expected-common">{html.escape(text[:separator + 1])}</span>'
+                f'<span class="expected-dynamic-token">{html.escape(text[separator + 1:])}</span>')
 
     def line(css, text, path=None):
         category = categories.get(path)
@@ -369,8 +383,12 @@ def hierarchical_diff_html(old, new, categories=None, show_all=False):
             marker_match = re.match(r"^(\s*)[+-]\s?(.*)$", text)
             yaml_text = (f"{marker_match.group(1)}{marker_match.group(2)}"
                          if marker_match else text)
-            content = (expected_line_html(yaml_text)
-                       if ENV_TOKEN_PATTERN.search(yaml_text) else html.escape(yaml_text))
+            if path in intrinsic_expected and str(path).lower().endswith(".image"):
+                content = expected_image_line_html(yaml_text)
+            elif ENV_TOKEN_PATTERN.search(yaml_text):
+                content = expected_line_html(yaml_text)
+            else:
+                content = html.escape(yaml_text)
             logical_path = environment_logical_value(path or "__root__")
             raw_signature = marker + yaml_text
             normalized_signature = environment_logical_value(raw_signature)
@@ -380,7 +398,8 @@ def hierarchical_diff_html(old, new, categories=None, show_all=False):
                 f' data-diff-key="{html.escape(logical_path, quote=True)}"'
                 f' data-raw-signature="{html.escape(raw_signature, quote=True)}"'
                 f' data-normalized-signature="{html.escape(normalized_signature, quote=True)}"'
-                f' data-env-derived="{str(raw_signature != normalized_signature).lower()}">'
+                f' data-env-derived="{str(raw_signature != normalized_signature).lower()}"'
+                f' data-intrinsic-expected="{str(path in intrinsic_expected).lower()}">'
                 f'<span class="diff-marker">{marker}</span>'
                 f'<span class="diff-yaml">{content}</span></span>'
             )
@@ -590,6 +609,11 @@ def hierarchical_diff_html(old, new, categories=None, show_all=False):
                         else:
                             line("ctx", f"{' ' * indent}- {scalar_text(av)}")
                     continue
+                if ((isinstance(av, str) and "\n" in av)
+                        or (isinstance(bv, str) and "\n" in bv)):
+                    line("ctx", f"{pad}- |")
+                    emit_multiline_diff(av, bv, indent + 2, None, child_path)
+                    continue
                 left_name = av.get("name") if isinstance(av, dict) else None
                 right_name = bv.get("name") if isinstance(bv, dict) else None
                 if left_name is not None and left_name == right_name:
@@ -731,6 +755,33 @@ def event_is_environment_only(old_value, new_value):
     return a != b and environment_logical_value(a) == environment_logical_value(b)
 
 
+def image_tag_only_diff(path, old_value, new_value):
+    """True when a container image keeps its repository and only changes tag."""
+    if old_value is _OMIT or new_value is _OMIT or not str(path).lower().endswith(".image"):
+        return False
+
+    def split_image(value):
+        text = str(value)
+        last_slash = text.rfind("/")
+        tag_separator = text.rfind(":")
+        if tag_separator <= last_slash:
+            return text, None
+        return text[:tag_separator], text[tag_separator + 1:]
+
+    old_repo, old_tag = split_image(old_value)
+    new_repo, new_tag = split_image(new_value)
+    return (old_repo == new_repo and old_tag is not None and new_tag is not None
+            and old_tag != new_tag)
+
+
+def intrinsic_expected_paths(old, new, env):
+    environment, _cluster = env_info(env)
+    if environment != "prod":
+        return set()
+    return {path for path, values in diff_events(old, new).items()
+            if image_tag_only_diff(path, *values)}
+
+
 def aggregate_environment_paths(text_pairs, required):
     """Find fields whose baseline or current side varies only by environment."""
     values_by_path = defaultdict(list)
@@ -754,9 +805,10 @@ def aggregate_environment_paths(text_pairs, required):
 
 
 def classify_diff_events(old, new, signature_counts=None, shared_required=0, unmatched=False,
-                         aggregate_expected_paths=None):
+                         aggregate_expected_paths=None, intrinsic_expected=None):
     signature_counts = signature_counts or Counter()
     aggregate_expected_paths = aggregate_expected_paths or set()
+    intrinsic_expected = intrinsic_expected or set()
     events = diff_events(old, new)
     expected_renames = set()
     if not unmatched:
@@ -775,7 +827,9 @@ def classify_diff_events(old, new, signature_counts=None, shared_required=0, unm
         environment_candidate = (path in expected_renames
                                  or path in aggregate_expected_paths
                                  or event_is_environment_only(old_value, new_value))
-        if (environment_candidate and shared_required > 0
+        if path in intrinsic_expected:
+            result[path] = "diff-expected-env"
+        elif (environment_candidate and shared_required > 0
                 and signature_counts[signature] == shared_required):
             result[path] = "diff-expected-env"
         elif (shared_required > 0
@@ -897,13 +951,40 @@ def scalar_text(value):
     return str(value)
 
 
+def flatten_app_env(value, prefix=""):
+    """Flatten App Config while keeping scalar lists as complete fields."""
+    out = {}
+    if isinstance(value, dict):
+        for key, child in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            out.update(flatten_app_env(child, path))
+    elif isinstance(value, list):
+        if not value or all(not isinstance(item, (dict, list)) for item in value):
+            out[prefix] = value
+        else:
+            identities = [list_item_identity(item) for item in value]
+            use_identities = (all(identity is not None for identity in identities)
+                              and len(set(identities)) == len(identities))
+            for index, child in enumerate(value):
+                if use_identities:
+                    identity_path, identity_value = identities[index]
+                    token = ".".join(identity_path) + "=" + identity_value
+                    child_path = f"{prefix}[{token}]"
+                else:
+                    child_path = f"{prefix}[{index}]"
+                out.update(flatten_app_env(child, child_path))
+    else:
+        out[prefix] = value
+    return out
+
+
 def app_semantic_matrix(items, title):
     envs = sorted({x["env"] for x in items}, key=env_sort)
     parsed = {}
     for item in items:
         docs = yaml_docs(item["text"])
         value = docs[0] if docs else {"raw": item["text"]}
-        parsed[item["env"]] = (item, value, flatten(value))
+        parsed[item["env"]] = (item, value, flatten_app_env(value))
     paths = sorted({p for _, _, fields in parsed.values() for p in fields},
                    key=lambda p: (category(p), p))
     head = []
@@ -1106,12 +1187,16 @@ def release_matrix(current, baseline, title, kind="generic"):
             old_compare, new_compare, old_full, new_full = hierarchical_diff_texts(old_text, new_text)
             old_name = f'baseline/{base["path"].name if base else "missing"}'
             new_name = f'current/{cur["path"].name if cur else "missing"}'
+            intrinsic = intrinsic_expected_paths(old_text, new_text, env)
             categories = classify_diff_events(old_text, new_text, signatures, len(envs),
                                               unmatched=(base is None or cur is None),
-                                              aggregate_expected_paths=aggregate_expected)
+                                              aggregate_expected_paths=aggregate_expected,
+                                              intrinsic_expected=intrinsic)
             categories.update(parent_categories)
-            compact_diff = hierarchical_diff_html(old_text, new_text, categories)
-            full_diff = hierarchical_diff_html(old_text, new_text, categories, show_all=True)
+            compact_diff = hierarchical_diff_html(old_text, new_text, categories,
+                                                  intrinsic_expected=intrinsic)
+            full_diff = hierarchical_diff_html(old_text, new_text, categories, show_all=True,
+                                               intrinsic_expected=intrinsic)
             cells.append(f'<td data-env="{html.escape(env, quote=True)}"><pre class="diff-compact">{compact_diff}</pre>'
                          f'<pre class="diff-full hidden">{full_diff}</pre></td>')
         rows.append(f'<tr><th class="row-title">{html.escape(logical)}</th>{"".join(cells)}</tr>')
@@ -1166,12 +1251,16 @@ def resource_release_matrix(current, baseline, title, raw_env_headers=False):
             else:
                 status = ""
             old_compare, new_compare, old_full, new_full = hierarchical_diff_texts(old or "", new or "")
+            intrinsic = intrinsic_expected_paths(old or "", new or "", env)
             categories = classify_diff_events(old or "", new or "", signatures, len(envs),
                                               unmatched=(old is None or new is None),
-                                              aggregate_expected_paths=aggregate_expected)
+                                              aggregate_expected_paths=aggregate_expected,
+                                              intrinsic_expected=intrinsic)
             categories.update(parent_categories)
-            compact = hierarchical_diff_html(old or "", new or "", categories)
-            full = hierarchical_diff_html(old or "", new or "", categories, show_all=True)
+            compact = hierarchical_diff_html(old or "", new or "", categories,
+                                             intrinsic_expected=intrinsic)
+            full = hierarchical_diff_html(old or "", new or "", categories, show_all=True,
+                                          intrinsic_expected=intrinsic)
             cells.append(f'<td data-env="{html.escape(env, quote=True)}">{status}'
                          f'<div class="collapse-box diff-compact"><pre class="collapsible-content">{compact}</pre></div>'
                          f'<div class="collapse-box diff-full hidden"><pre class="collapsible-content">{full}</pre></div></td>')
@@ -1189,7 +1278,7 @@ def resource_release_matrix(current, baseline, title, raw_env_headers=False):
 def diff_legend():
     return ('<div class="diff-legend">'
             '<span class="legend-all">Diff in all namespaces</span>'
-            '<span class="legend-env">Expected Diff · environment suffix only</span>'
+            '<span class="legend-env">Expected Diff · recognized rule</span>'
             '<span class="legend-actual">Diff</span>'
             '</div>')
 
@@ -1364,7 +1453,7 @@ th small{display:block;color:var(--yellow);margin-top:5px;font-weight:400}td{bac
 .release td pre{margin:4px 6px;padding:6px 8px;font-size:11px;line-height:1.28}.release .add,.release .del,.release .hunk,.release .diff-file,.release .ctx{display:inline;margin:0;padding:0;line-height:1.28}
 .release-toolbar{display:flex;align-items:center;gap:10px}.release-toolbar span{font-size:12px}.release-view-toggle{border:1px solid #2c7699;background:#edf7fb;color:#1d607f;border-radius:6px;padding:7px 11px;cursor:pointer}.release-view-toggle:hover{background:#dceff7}.hidden{display:none!important}
 .workload-title{font-weight:700}.workload-status{margin:6px 7px 0;padding:4px 8px;font-size:11px;font-weight:700;border-left:3px solid}.added-status{color:#08733f;border-color:#08733f}.removed-status{color:#c12640;border-color:#c12640}.absent-workload{min-height:36px;background:#fafbfd}
-.diff-fragment{display:inline-grid!important;vertical-align:top;grid-template-columns:12px minmax(0,1fr);width:100%;background:transparent!important}.diff-marker{grid-column:1;text-align:center;font-weight:800;border-radius:2px 0 0 2px}.diff-yaml{grid-column:2;white-space:pre-wrap;min-width:0;border-radius:0 2px 2px 0}.diff-compact .ctx,.diff-full .ctx{display:inline;padding-left:12px}.diff-fragment.diff-all-namespaces>.diff-marker,.diff-fragment.diff-all-namespaces>.diff-yaml{background:#e4f6ea}.diff-fragment.diff-expected-env>.diff-marker,.diff-fragment.diff-expected-env>.diff-yaml{background:#e4f6ea}.diff-fragment.diff-actual>.diff-marker,.diff-fragment.diff-actual>.diff-yaml{background:#ffe7eb}.diff-fragment.diff-expected-env .expected-common{background:transparent}.diff-fragment.diff-expected-env .expected-env-token{background:#bfe3f7;border-radius:2px;font-weight:800}.diff-legend{display:flex;flex:none;gap:7px;padding:4px 7px;font-size:9px;color:#52637b}.diff-legend span{padding:2px 6px;border-radius:8px}.legend-all{background:#dff3e6}.legend-env{background:#bfe3f7;color:#086b9c}.legend-actual{background:#ffe0e5}
+.diff-fragment{display:inline-grid!important;vertical-align:top;grid-template-columns:12px minmax(0,1fr);width:100%;background:transparent!important}.diff-marker{grid-column:1;text-align:center;font-weight:800;border-radius:2px 0 0 2px}.diff-yaml{grid-column:2;white-space:pre-wrap;min-width:0;border-radius:0 2px 2px 0}.diff-compact .ctx,.diff-full .ctx{display:inline;padding-left:12px}.diff-fragment.diff-all-namespaces>.diff-marker,.diff-fragment.diff-all-namespaces>.diff-yaml{background:#e4f6ea}.diff-fragment.diff-expected-env>.diff-marker,.diff-fragment.diff-expected-env>.diff-yaml{background:#e4f6ea}.diff-fragment.diff-actual>.diff-marker,.diff-fragment.diff-actual>.diff-yaml{background:#ffe7eb}.diff-fragment.diff-expected-env .expected-common{background:transparent}.diff-fragment.diff-expected-env .expected-env-token,.diff-fragment.diff-expected-env .expected-dynamic-token{background:#bfe3f7;border-radius:2px;font-weight:800}.diff-legend{display:flex;flex:none;gap:7px;padding:4px 7px;font-size:9px;color:#52637b}.diff-legend span{padding:2px 6px;border-radius:8px}.legend-all{background:#dff3e6}.legend-env{background:#bfe3f7;color:#086b9c}.legend-actual{background:#ffe0e5}
 .collapse-box{position:relative}.collapsible-content{max-height:280px;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable}.field-collapse .collapsible-content{max-height:92px;white-space:pre-wrap}.collapsible-content::-webkit-scrollbar{width:7px}.collapsible-content::-webkit-scrollbar-thumb{background:#b8c8d5;border-radius:6px}.collapsible-content::-webkit-scrollbar-track{background:#edf2f6}
 .release-version-bar{display:flex;flex:none;align-items:center;gap:10px;padding:7px 12px;background:#f7fafc;border-bottom:1px solid var(--line)}.release-version-bar>div:not(.version-arrow){display:flex;align-items:center;gap:6px}.release-version-bar span{color:var(--muted);font-size:10px}.release-version-bar b{color:#174f6b;font:600 11px Consolas,monospace}.version-arrow{color:#6f8198;font-size:14px}
 .namespace-hidden{display:none!important}.only-differences .same-row{display:none}@media(max-width:800px){aside{display:none}main{top:56px;right:0;bottom:0;left:0;margin:0;padding:8px}.namespace-picker-toggle{min-width:auto}.namespace-picker-label{display:none}.namespace-picker-menu{right:0;width:min(350px,calc(100vw - 16px))}}
@@ -1436,7 +1525,10 @@ function reclassifyReleaseTable(table,selected){
      const classification=exact?'diff-all-namespaces':
        (normalized&&hasEnv?'diff-expected-env':'diff-actual');
      cells.forEach(cell=>cell.querySelectorAll('.diff-fragment[data-diff-path]').forEach(fragment=>{
-       if(fragment.dataset.diffKey===path)setDiffClass(fragment,classification);
+       if(fragment.dataset.diffKey===path){
+         setDiffClass(fragment,fragment.dataset.intrinsicExpected==='true'
+           ?'diff-expected-env':classification);
+       }
      }));
    });
  });

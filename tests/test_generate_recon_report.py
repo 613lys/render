@@ -7,6 +7,96 @@ import generate_recon_report as report
 
 
 class ReconciliationReportTests(unittest.TestCase):
+    def test_app_env_scalar_list_stays_as_one_field(self):
+        value = {
+            "security": {"allowed-origins": ["service-a", "service-b"]},
+            "empty-list": [],
+        }
+        flattened = report.flatten_app_env(value)
+        self.assertEqual(
+            flattened["security.allowed-origins"], ["service-a", "service-b"]
+        )
+        self.assertEqual(flattened["empty-list"], [])
+        self.assertNotIn("security.allowed-origins[0]", flattened)
+
+    def test_app_env_named_object_list_uses_identity_not_position(self):
+        value = {"targets": [
+            {"name": "primary", "url": "https://primary"},
+            {"name": "backup", "url": "https://backup"},
+        ]}
+        flattened = report.flatten_app_env(value)
+        self.assertIn("targets[name=primary].url", flattened)
+        self.assertIn("targets[name=backup].url", flattened)
+        self.assertNotIn("targets[0].url", flattened)
+
+    def test_changed_multiline_list_item_keeps_block_scalar_marker(self):
+        old = """spec:
+  command:
+    - /bin/sh
+    - -c
+    - |
+      echo legacy
+"""
+        new = old.replace("echo legacy", "echo current")
+        rendered = report.hierarchical_diff_html(old, new)
+        self.assertIn('<span class="ctx">    - |</span>', rendered)
+        self.assertNotIn('<span class="ctx">    -</span><br>', rendered)
+        self.assertIn("      echo legacy", rendered)
+        self.assertIn("      echo current", rendered)
+
+    def test_configmap_empty_data_values_render_blank_not_null(self):
+        text = """apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: empty-config
+  annotations: null
+data:
+  EMPTY_VALUE:
+  application.yaml: |-
+    feature:
+    enabled: true
+"""
+        docs = report.yaml_docs(text)
+        expanded = report.expand_embedded_yaml(docs[0])
+        self.assertEqual(expanded["data"]["EMPTY_VALUE"], "")
+        self.assertEqual(expanded["data"]["application.yaml"]["feature"], "")
+        self.assertIsNone(expanded["metadata"]["annotations"])
+        rendered = report.hierarchical_diff_html("", text, show_all=True)
+        self.assertIn("EMPTY_VALUE: ", rendered)
+        self.assertIn("feature: ", rendered)
+        self.assertNotIn("EMPTY_VALUE: null", rendered)
+        self.assertIn("annotations: null", rendered)
+
+    def test_prod_image_tag_only_change_is_intrinsically_expected(self):
+        old = """spec:
+  template:
+    spec:
+      containers:
+        - name: api
+          image: registry.example/team/api:2026.06.18-1
+"""
+        new = old.replace("2026.06.18-1", "2026.07.08-6")
+        prod_paths = report.intrinsic_expected_paths(old, new, "cbjvbi4_ops-prod")
+        dev_paths = report.intrinsic_expected_paths(old, new, "cshgbi2_ops-dev")
+        self.assertEqual(len(prod_paths), 1)
+        self.assertEqual(dev_paths, set())
+        categories = report.classify_diff_events(
+            old, new, shared_required=6, intrinsic_expected=prod_paths
+        )
+        self.assertEqual(set(categories.values()), {"diff-expected-env"})
+        rendered = report.hierarchical_diff_html(
+            old, new, categories, intrinsic_expected=prod_paths
+        )
+        self.assertIn('data-intrinsic-expected="true"', rendered)
+        self.assertIn('<span class="expected-dynamic-token">2026.07.08-6</span>', rendered)
+
+    def test_image_repository_change_is_not_intrinsically_expected(self):
+        old = "image: registry.example/team/api:1.0.0\n"
+        new = "image: registry.example/other/api:1.0.1\n"
+        path, values = next(iter(report.diff_events(old, new).items()))
+        self.assertFalse(report.image_tag_only_diff(path, *values))
+        self.assertEqual(report.intrinsic_expected_paths(old, new, "cshg-prod"), set())
+
     def test_namespace_family_uses_ms_and_bi_markers(self):
         self.assertEqual(report.namespace_family("cshgms3_airflow3-dev-24969"), "msms")
         self.assertEqual(report.namespace_family("cshgbi2_panda-automation-dev"), "msbic")
