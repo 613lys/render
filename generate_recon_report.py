@@ -29,6 +29,29 @@ CATEGORY_RULES = [
 CATEGORY_RULES.sort(key=lambda item: len(item[0]), reverse=True)
 ENV_ORDER = {"dev": 0, "qa": 1, "prod": 2, "pp": 3, "pr": 4, "bcp": 5}
 CLUSTER_ORDER = {"shg": 0, "bjv": 1}
+ENV_NAMES = r"dev|qa|prod|pp|pr|bcp"
+AUTOMATION_ENV_PATTERN = r"(?:panda-automation-(?:dev|qa)|ops-automation-prod)"
+SIMPLE_ENV_TOKEN_PATTERN = re.compile(
+    rf"(?:c?shg|c?bjv)(?:-ms)?[-_]?(?:{ENV_NAMES})|(?<![A-Za-z])(?:{ENV_NAMES})(?![A-Za-z])",
+    re.I,
+)
+ENV_TOKEN_PATTERN = re.compile(
+    rf"{AUTOMATION_ENV_PATTERN}|{SIMPLE_ENV_TOKEN_PATTERN.pattern}",
+    re.I,
+)
+
+
+def normalize_environment_tokens(value, replacement="<env>"):
+    text = re.sub(AUTOMATION_ENV_PATTERN, f"automation{replacement}", str(value), flags=re.I)
+    return SIMPLE_ENV_TOKEN_PATTERN.sub(replacement, text)
+
+
+def environment_logical_value(value):
+    """Remove optional environment suffixes/aliases for logical matching."""
+    text = normalize_environment_tokens(value)
+    text = re.sub(r"^<env>[-_]?", "", text, flags=re.I)
+    text = re.sub(r"[-_]?<env>(?=$|[-_.])", "", text, flags=re.I)
+    return text
 
 
 class PrettyDumper(yaml.SafeDumper):
@@ -81,6 +104,7 @@ def normalize_name(value: str) -> str:
     # Remove Git/SHA-256 suffixes before environment normalization, then repeat
     # after it so both name-env-sha and name-sha-env conventions are supported.
     stem = re.sub(r"(?:-sha(?:1|256)?-?|-)(?=[0-9a-f]{7,64}$)[0-9a-f]{7,64}$", "", stem, flags=re.I)
+    stem = re.sub(rf"-(?:{AUTOMATION_ENV_PATTERN})$", "", stem, flags=re.I)
     stem = re.sub(r"-(?:c?shg|c?bjv)(?:-ms)?-(?:dev|qa|prod|pp|pr|bcp)$", "", stem, flags=re.I)
     stem = re.sub(r"-(?:(?:c?shg|c?bjv)[-_]?)?(?:dev|qa|prod|pp|pr|bcp)[-_]\d+$", "", stem, flags=re.I)
     stem = re.sub(r"-(?:prod-bcp|prod-bj|dev-bcp|qa-bcp|dev|qa|prod|pp|pr|bcp)(?=-|$)", "", stem,
@@ -178,6 +202,89 @@ def expand_embedded_yaml(node):
     return node
 
 
+def list_item_identity(item):
+    """Return the unique name path/value used to align unordered YAML list items."""
+    if not isinstance(item, dict):
+        return None
+    if "name" in item and not isinstance(item["name"], (dict, list)):
+        return (("name",), str(item["name"]))
+    candidates = []
+
+    def collect(node, path=()):
+        if not isinstance(node, dict):
+            return
+        for key, value in node.items():
+            child_path = path + (str(key),)
+            if key == "name" and not isinstance(value, (dict, list)):
+                candidates.append((child_path, str(value)))
+            elif isinstance(value, dict):
+                collect(value, child_path)
+
+    collect(item)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def identity_aligned_list(left, right):
+    """Align two lists by a unique name identity, or return None for index fallback."""
+    combined = list(left) + list(right)
+    identities = [list_item_identity(item) for item in combined]
+    if not combined or any(identity is None for identity in identities):
+        return None
+    left_ids = [list_item_identity(item) for item in left]
+    right_ids = [list_item_identity(item) for item in right]
+    if len(set(left_ids)) != len(left_ids) or len(set(right_ids)) != len(right_ids):
+        return None
+    left_map = dict(zip(left_ids, left))
+    right_map = dict(zip(right_ids, right))
+    order = left_ids + [identity for identity in right_ids if identity not in left_map]
+    return [(identity, left_map.get(identity, _OMIT), right_map.get(identity, _OMIT))
+            for identity in order]
+
+
+def without_identity(item, identity_path):
+    """Copy a list item without its identity leaf so it can be shown as context once."""
+    if not isinstance(item, dict):
+        return item
+    result = json.loads(json.dumps(item))
+    node = result
+    parents = []
+    for key in identity_path[:-1]:
+        if not isinstance(node, dict) or key not in node:
+            return result
+        parents.append((node, key))
+        node = node[key]
+    if isinstance(node, dict):
+        node.pop(identity_path[-1], None)
+    for parent, key in reversed(parents):
+        if parent.get(key) == {}:
+            parent.pop(key)
+    return result
+
+
+def flatten_diff(value, prefix=""):
+    """Flatten YAML using stable list identities so classification matches rendering."""
+    out = {}
+    if isinstance(value, dict):
+        for key, child in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            out.update(flatten_diff(child, path))
+    elif isinstance(value, list):
+        identities = [list_item_identity(item) for item in value]
+        use_identities = (bool(value) and all(identity is not None for identity in identities)
+                          and len(set(identities)) == len(identities))
+        for index, child in enumerate(value):
+            if use_identities:
+                identity_path, identity_value = identities[index]
+                token = ".".join(identity_path) + "=" + identity_value
+                child_path = f"{prefix}[{token}]"
+            else:
+                child_path = f"{prefix}[{index}]"
+            out.update(flatten_diff(child, child_path))
+    else:
+        out[prefix] = value
+    return out
+
+
 def prune_yaml(node, changed_paths, path=""):
     if isinstance(node, dict):
         result = {}
@@ -227,9 +334,8 @@ def hierarchical_diff_html(old, new, categories=None, show_all=False):
     categories = categories or {}
 
     def expected_line_html(text):
-        pattern = re.compile(r"(?<![A-Za-z])(?:dev|qa|prod|pp|pr|bcp)(?![A-Za-z])", re.I)
         pieces, cursor = [], 0
-        for match in pattern.finditer(text):
+        for match in ENV_TOKEN_PATTERN.finditer(text):
             pieces.append(f'<span class="expected-common">{html.escape(text[cursor:match.start()])}</span>')
             pieces.append(f'<span class="expected-env-token">{html.escape(match.group(0))}</span>')
             cursor = match.end()
@@ -247,14 +353,43 @@ def hierarchical_diff_html(old, new, categories=None, show_all=False):
                 category = next(iter(descendant_categories))
         category = category or "diff-actual"
         category_class = f" diff-fragment {category}" if css in ("add", "del") else ""
-        if category == "diff-expected-env" and css in ("add", "del"):
-            content = expected_line_html(text)
+        if css in ("add", "del"):
+            marker = "+" if css == "add" else "-"
+            marker_match = re.match(r"^(\s*)[+-]\s?(.*)$", text)
+            yaml_text = (f"{marker_match.group(1)}{marker_match.group(2)}"
+                         if marker_match else text)
+            content = (expected_line_html(yaml_text)
+                       if category == "diff-expected-env" else html.escape(yaml_text))
+            rows.append(
+                f'<span class="{css}{category_class}">'
+                f'<span class="diff-marker">{marker}</span>'
+                f'<span class="diff-yaml">{content}</span></span>'
+            )
         else:
-            content = html.escape(text)
-        rows.append(f'<span class="{css}{category_class}">{content}</span>')
+            rows.append(f'<span class="{css}">{html.escape(text)}</span>')
 
     def scalar_line(prefix, value):
         return f"{prefix}{scalar_text(value)}"
+
+    def emit_multiline_diff(a, b, indent, key, path):
+        pad = " " * indent
+        if key is not None:
+            line("ctx", f"{pad}{key}: |-")
+            indent += 2
+        old_lines = [] if a is _OMIT else str(a).splitlines()
+        new_lines = [] if b is _OMIT else str(b).splitlines()
+        matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
+        for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
+            if tag == "equal":
+                if show_all:
+                    for raw_line in old_lines[old_start:old_end]:
+                        line("ctx", f"{' ' * indent}{raw_line}")
+            if tag in ("delete", "replace"):
+                for raw_line in old_lines[old_start:old_end]:
+                    line("del", f"{' ' * indent}- {raw_line}", path)
+            if tag in ("insert", "replace"):
+                for raw_line in new_lines[new_start:new_end]:
+                    line("add", f"{' ' * indent}+ {raw_line}", path)
 
     def emit_context(node, indent=0, key=None):
         pad = " " * indent
@@ -273,6 +408,15 @@ def hierarchical_diff_html(old, new, categories=None, show_all=False):
                 if isinstance(child, dict) and "name" in child:
                     line("ctx", f"{pad}- name: {scalar_text(child['name'])}")
                     emit_context({k: v for k, v in child.items() if k != "name"}, indent + 2)
+                elif isinstance(child, dict) and child:
+                    items = list(child.items())
+                    first_key, first_value = items[0]
+                    if isinstance(first_value, (dict, list)):
+                        line("ctx", f"{pad}- {first_key}:")
+                        emit_context(first_value, indent + 4)
+                    else:
+                        line("ctx", f"{pad}- {first_key}: {scalar_text(first_value)}")
+                    emit_context(dict(items[1:]), indent + 2)
                 elif isinstance(child, (dict, list)):
                     line("ctx", f"{pad}-")
                     emit_context(child, indent + 2)
@@ -297,24 +441,54 @@ def hierarchical_diff_html(old, new, categories=None, show_all=False):
                 else:
                     line(css, f"{' ' * indent}{marker} {child_key}: {scalar_text(child)}", child_path)
         elif isinstance(node, list):
+            identities = [list_item_identity(child) for child in node]
+            use_identities = (bool(node) and all(identity is not None for identity in identities)
+                              and len(set(identities)) == len(identities))
             for index, child in enumerate(node):
-                child_path = f"{path}[{index}]"
-                if isinstance(child, dict):
-                    line(css, f"{pad}{marker} -", child_path)
-                    for child_key, value in child.items():
-                        nested_path = f"{child_path}.{child_key}"
-                        if isinstance(value, (dict, list)):
-                            emit_one_sided(value, css, indent + 2, child_key, nested_path)
-                        else:
-                            line(css, f"{' ' * (indent + 2)}{marker} {child_key}: {scalar_text(value)}",
-                                 nested_path)
-                elif isinstance(child, list):
-                    line(css, f"{pad}{marker} -", child_path)
-                    emit_one_sided(child, css, indent + 2, path=child_path)
+                if use_identities:
+                    identity_path, identity_value = identities[index]
+                    token = ".".join(identity_path) + "=" + identity_value
+                    child_path = f"{path}[{token}]"
                 else:
-                    line(css, f"{pad}{marker} - {scalar_text(child)}", child_path)
+                    child_path = f"{path}[{index}]"
+                emit_list_item_one_sided(child, css, indent, child_path)
         elif key is not None:
             line(css, f"{pad}{marker} {key}: {scalar_text(node)}", path)
+
+    def emit_list_identity(identity, indent):
+        identity_path, identity_value = identity
+        pad = " " * indent
+        if len(identity_path) == 1:
+            line("ctx", f"{pad}- {identity_path[0]}: {identity_value}")
+            return
+        line("ctx", f"{pad}- {identity_path[0]}:")
+        for depth, key_part in enumerate(identity_path[1:-1], start=1):
+            line("ctx", f"{' ' * (indent + depth * 2)}{key_part}:")
+        line("ctx", f"{' ' * (indent + len(identity_path) * 2)}{identity_path[-1]}: {identity_value}")
+
+    def emit_list_item_one_sided(item, css, indent, path):
+        marker = "+" if css == "add" else "-"
+        pad = " " * indent
+        if isinstance(item, dict):
+            items = list(item.items())
+            if not items:
+                line(css, f"{pad}{marker} - {{}}", path)
+                return
+            first_key, first_child = items[0]
+            first_path = f"{path}.{first_key}"
+            if isinstance(first_child, (dict, list)):
+                line(css, f"{pad}{marker} - {first_key}:", first_path)
+                emit_one_sided(first_child, css, indent + 4, path=first_path)
+            else:
+                line(css, f"{pad}{marker} - {first_key}: {scalar_text(first_child)}", first_path)
+            for child_key, child in items[1:]:
+                child_path = f"{path}.{child_key}"
+                if isinstance(child, (dict, list)):
+                    emit_one_sided(child, css, indent + 2, child_key, child_path)
+                else:
+                    line(css, f"{' ' * (indent + 2)}{marker} {child_key}: {scalar_text(child)}", child_path)
+        else:
+            line(css, f"{pad}{marker} - {scalar_text(item)}", path)
 
     def walk(a, b, indent=0, key=None, path=""):
         if a is not _OMIT and b is not _OMIT and a == b:
@@ -349,6 +523,9 @@ def hierarchical_diff_html(old, new, categories=None, show_all=False):
                     continue
                 if isinstance(av, (dict, list)) or isinstance(bv, (dict, list)):
                     walk(av, bv, indent, child_key, child_path)
+                elif ((isinstance(av, str) and "\n" in av)
+                      or (isinstance(bv, str) and "\n" in bv)):
+                    emit_multiline_diff(av, bv, indent, child_key, child_path)
                 else:
                     if av is not _OMIT:
                         line("del", scalar_line(f"{' ' * indent}- {child_key}: ", av), child_path)
@@ -358,6 +535,25 @@ def hierarchical_diff_html(old, new, categories=None, show_all=False):
         if isinstance(a, list) or isinstance(b, list):
             left_list = a if isinstance(a, list) else []
             right_list = b if isinstance(b, list) else []
+            aligned = identity_aligned_list(left_list, right_list)
+            if aligned is not None:
+                for identity, av, bv in aligned:
+                    identity_path, identity_value = identity
+                    identity_token = ".".join(identity_path) + "=" + identity_value
+                    child_path = f"{path}[{identity_token}]"
+                    if av is _OMIT:
+                        emit_list_item_one_sided(bv, "add", indent, child_path)
+                    elif bv is _OMIT:
+                        emit_list_item_one_sided(av, "del", indent, child_path)
+                    elif av == bv:
+                        if show_all:
+                            emit_context(av, indent)
+                    else:
+                        emit_list_identity(identity, indent)
+                        walk(without_identity(av, identity_path),
+                             without_identity(bv, identity_path),
+                             indent + 2, path=child_path)
+                return
             for index in range(max(len(left_list), len(right_list))):
                 child_path = f"{path}[{index}]"
                 av = left_list[index] if index < len(left_list) else _OMIT
@@ -367,6 +563,8 @@ def hierarchical_diff_html(old, new, categories=None, show_all=False):
                         if isinstance(av, dict) and "name" in av:
                             line("ctx", f"{' ' * indent}- name: {scalar_text(av['name'])}")
                             emit_context({k: v for k, v in av.items() if k != "name"}, indent + 2)
+                        elif isinstance(av, dict):
+                            emit_context([av], indent)
                         elif isinstance(av, (dict, list)):
                             line("ctx", f"{' ' * indent}-")
                             emit_context(av, indent + 2)
@@ -380,9 +578,32 @@ def hierarchical_diff_html(old, new, categories=None, show_all=False):
                     walk({k: v for k, v in av.items() if k != "name"},
                          {k: v for k, v in bv.items() if k != "name"}, indent + 2,
                          path=child_path)
+                elif isinstance(av, dict) and isinstance(bv, dict):
+                    shared_first = next(
+                        (candidate for candidate in av
+                         if candidate in bv and av[candidate] == bv[candidate]),
+                        None,
+                    )
+                    if shared_first is not None:
+                        shared_value = av[shared_first]
+                        if isinstance(shared_value, (dict, list)):
+                            line("ctx", f"{pad}- {shared_first}:")
+                            emit_context(shared_value, indent + 4)
+                        else:
+                            line("ctx", f"{pad}- {shared_first}: {scalar_text(shared_value)}")
+                        walk({k: v for k, v in av.items() if k != shared_first},
+                             {k: v for k, v in bv.items() if k != shared_first},
+                             indent + 2, path=child_path)
+                    else:
+                        line("ctx", f"{pad}-")
+                        walk(av, bv, indent + 2, path=child_path)
                 else:
                     line("ctx", f"{pad}-")
                     walk(av, bv, indent + 2, path=child_path)
+            return
+        if ((isinstance(a, str) and "\n" in a)
+                or (isinstance(b, str) and "\n" in b)):
+            emit_multiline_diff(a, b, indent, key, path)
             return
         prefix = f"{pad}{key}: " if key is not None else pad
         if a is not _OMIT:
@@ -398,8 +619,7 @@ def normalized_diff_signature(old, new):
     old_sem, new_sem = semantic_text(old), semantic_text(new)
     changed = list(difflib.unified_diff(old_sem.splitlines(), new_sem.splitlines(), n=0, lineterm=""))
     signature = "\n".join(line for line in changed if not line.startswith(("---", "+++", "@@")))
-    signature = re.sub(r"(?:c?shg|c?bjv)(?:-ms)?[-_](?:dev|qa|prod|pp|pr|bcp)", "<env>", signature, flags=re.I)
-    signature = re.sub(r"(?<![a-z])(?:dev|qa|prod|pp|pr|bcp)(?![a-z])", "<env>", signature, flags=re.I)
+    signature = normalize_environment_tokens(signature)
     signature = re.sub(r"(?:sha(?:1|256)-?)?[0-9a-f]{7,64}", "<sha>", signature, flags=re.I)
     return signature
 
@@ -413,16 +633,15 @@ def environment_only_diff(old, new):
         if path not in left or path not in right:
             return False
         a, b = str(left[path]), str(right[path])
-        clean = lambda s: re.sub(r"(?:c?shg|c?bjv)(?:-ms)?[-_]?(?:dev|qa|prod|pp|pr|bcp)|(?:dev|qa|prod|pp|pr|bcp)", "<env>", s, flags=re.I)
-        if normalize_name(a) != normalize_name(b) and clean(a) != clean(b):
+        if normalize_name(a) != normalize_name(b) and environment_logical_value(a) != environment_logical_value(b):
             return False
     return True
 
 
 def diff_events(old, new):
     old_docs, new_docs = yaml_docs(old), yaml_docs(new)
-    left = flatten(expand_embedded_yaml(old_docs[0])) if old_docs else {}
-    right = flatten(expand_embedded_yaml(new_docs[0])) if new_docs else {}
+    left = flatten_diff(expand_embedded_yaml(old_docs[0])) if old_docs else {}
+    right = flatten_diff(expand_embedded_yaml(new_docs[0])) if new_docs else {}
     return {path: (left.get(path, _OMIT), right.get(path, _OMIT))
             for path in set(left) | set(right)
             if left.get(path, _OMIT) != right.get(path, _OMIT)}
@@ -472,8 +691,7 @@ def normalize_event_text(value):
     if value is _OMIT:
         return "<missing>"
     text = str(value)
-    text = re.sub(r"(?:c?shg|c?bjv)(?:-ms)?[-_]?(?:dev|qa|prod|pp|pr|bcp)", "<env>", text, flags=re.I)
-    text = re.sub(r"(?<![a-z])(?:dev|qa|prod|pp|pr|bcp)(?![a-z])", "<env>", text, flags=re.I)
+    text = environment_logical_value(text)
     return re.sub(r"(?:sha(?:1|256)-?)?[0-9a-f]{7,64}", "<sha>", text, flags=re.I)
 
 
@@ -491,18 +709,12 @@ def event_is_environment_only(old_value, new_value):
     sha_pattern = r"(?:sha(?:1|256)-?)?[0-9a-f]{7,64}"
     if re.search(sha_pattern, a, re.I) or re.search(sha_pattern, b, re.I):
         return False
-    normalize_env = lambda text: re.sub(
-        r"(?:c?shg|c?bjv)(?:-ms)?[-_]?(?:dev|qa|prod|pp|pr|bcp)|(?<![a-z])(?:dev|qa|prod|pp|pr|bcp)(?![a-z])",
-        "<env>", text, flags=re.I)
-    return a != b and normalize_env(a) == normalize_env(b)
+    return a != b and environment_logical_value(a) == environment_logical_value(b)
 
 
 def aggregate_environment_paths(text_pairs, required):
     """Find fields whose baseline or current side varies only by environment."""
     values_by_path = defaultdict(list)
-    env_pattern = re.compile(
-        r"(?:c?shg|c?bjv)(?:-ms)?[-_]?(?:dev|qa|prod|pp|pr|bcp)|(?<![a-z])(?:dev|qa|prod|pp|pr|bcp)(?![a-z])",
-        re.I)
     sha_pattern = re.compile(r"(?:sha(?:1|256)-?)?[0-9a-f]{7,64}", re.I)
     for old, new in text_pairs:
         for path, values in diff_events(old, new).items():
@@ -513,9 +725,9 @@ def aggregate_environment_paths(text_pairs, required):
             return False
         raw = [str(value) for value in values]
         return (len(set(raw)) > 1
-                and all(env_pattern.search(value) for value in raw)
+                and any(ENV_TOKEN_PATTERN.search(value) for value in raw)
                 and not any(sha_pattern.search(value) for value in raw)
-                and len({env_pattern.sub("<env>", value) for value in raw}) == 1)
+                and len({environment_logical_value(value) for value in raw}) == 1)
 
     return {path for path, values in values_by_path.items()
             if side_varies_as_environment([old for old, _ in values])
@@ -535,8 +747,8 @@ def classify_diff_events(old, new, signature_counts=None, shared_required=0, unm
                  if values[0] is _OMIT and values[1] is not _OMIT]
         for old_path, old_value in removed:
             for new_path, new_value in added:
-                if (normalize_event_text(old_path) == normalize_event_text(new_path)
-                        and normalize_event_text(old_value) == normalize_event_text(new_value)):
+                if (environment_logical_value(old_path) == environment_logical_value(new_path)
+                        and environment_logical_value(old_value) == environment_logical_value(new_value)):
                     expected_renames.update((old_path, new_path))
     result = {}
     for path, (old_value, new_value) in events.items():
@@ -544,10 +756,10 @@ def classify_diff_events(old, new, signature_counts=None, shared_required=0, unm
         environment_candidate = (path in expected_renames
                                  or path in aggregate_expected_paths
                                  or event_is_environment_only(old_value, new_value))
-        if (not unmatched and environment_candidate and shared_required > 0
+        if (environment_candidate and shared_required > 0
                 and signature_counts[signature] == shared_required):
             result[path] = "diff-expected-env"
-        elif (not unmatched and shared_required > 0
+        elif (shared_required > 0
               and signature_counts[signature] == shared_required):
             result[path] = "diff-all-namespaces"
         else:
@@ -857,9 +1069,11 @@ def release_matrix(current, baseline, title, kind="generic"):
         for env in envs:
             c = cg.get((env, logical), [])
             b = bg.get((env, logical), [])
-            if c and b:
-                text_pairs.append((b[0]["text"], c[0]["text"]))
-                for path, (old_value, new_value) in diff_events(b[0]["text"], c[0]["text"]).items():
+            if c or b:
+                old_text = b[0]["text"] if b else ""
+                new_text = c[0]["text"] if c else ""
+                text_pairs.append((old_text, new_text))
+                for path, (old_value, new_value) in diff_events(old_text, new_text).items():
                     signatures[event_signature(path, old_value, new_value)] += 1
         aggregate_expected = aggregate_environment_paths(text_pairs, len(envs))
         parent_categories = shared_one_sided_parent_categories(text_pairs, len(envs))
@@ -912,9 +1126,10 @@ def resource_release_matrix(current, baseline, title, raw_env_headers=False):
         for env in envs:
             old = bg.get(env, {}).get(workload)
             new = cg.get(env, {}).get(workload)
-            if old is not None and new is not None:
-                text_pairs.append((old, new))
-                for path, (old_value, new_value) in diff_events(old, new).items():
+            if old is not None or new is not None:
+                old_text, new_text = old or "", new or ""
+                text_pairs.append((old_text, new_text))
+                for path, (old_value, new_value) in diff_events(old_text, new_text).items():
                     signatures[event_signature(path, old_value, new_value)] += 1
         aggregate_expected = aggregate_environment_paths(text_pairs, len(envs))
         parent_categories = shared_one_sided_parent_categories(text_pairs, len(envs))
@@ -964,13 +1179,12 @@ def tabs(sections, extra_class=""):
     buttons, bodies = [], []
     for i, section in enumerate(sections):
         label, body = section[0], section[1]
-        changed = section[2] if len(section) > 2 else None
+        status = section[2] if len(section) > 2 else None
         active = " active" if i == 0 else ""
         badge = ""
-        if changed is not None:
-            status = "DIFF" if changed else "NO DIFF"
-            cls = "has-diff" if changed else "no-diff"
-            badge = f'<span class="tab-diff-badge {cls}">{status}</span>'
+        if status is not None:
+            label_text, cls = release_status_meta(status)
+            badge = f'<span class="tab-diff-badge {cls}">{label_text}</span>'
         buttons.append(f'<button class="tab{active}" data-index="{i}">'
                        f'{html.escape(label)}{badge}</button>')
         bodies.append(f'<div class="tab-pane{active}" data-index="{i}">{body}</div>')
@@ -1000,11 +1214,34 @@ def release_changed(current_items, baseline_items, kind):
     return snapshot(current_items) != snapshot(baseline_items)
 
 
-def nav_item(cid, label, changed):
-    status = "DIFF" if changed else "NO DIFF"
-    cls = "has-diff" if changed else "no-diff"
+def release_status(changed, rendered_release):
+    if not changed:
+        return "none"
+    if "diff-actual" in rendered_release:
+        return "diff"
+    return "expected"
+
+
+def release_status_meta(status):
+    return {
+        "none": ("No Diff", "no-diff"),
+        "expected": ("All Expected Diff", "expected-diff"),
+        "diff": ("Diff", "has-diff"),
+    }[status]
+
+
+def combined_release_status(*statuses):
+    if "diff" in statuses:
+        return "diff"
+    if "expected" in statuses:
+        return "expected"
+    return "none"
+
+
+def nav_item(cid, label, status):
+    status_text, cls = release_status_meta(status)
     return (f'<a href="#{cid}" data-target="{cid}"><span>{html.escape(label)}</span>'
-            f'<span class="diff-badge {cls}">{status}</span></a>')
+            f'<span class="diff-badge {cls}">{status_text}</span></a>')
 
 
 def build(input_dir: Path):
@@ -1019,12 +1256,14 @@ def build(input_dir: Path):
         # Mock convention: Helm chart and module share their name.
         ch = [x for x in current["helm"] if x["name"] == module]
         bh = [x for x in baseline["helm"] if x["name"] == module]
-        helm_changed = release_changed(ch, bh, "helm")
-        app_changed = release_changed(cc, bb, "app_config")
-        nav.append(nav_item(cid, module, helm_changed or app_changed))
+        helm_release = resource_release_matrix(ch, bh, "Workload (kind / metadata.name)")
+        app_release = app_release_config_tabs(cc, bb)
+        helm_status = release_status(release_changed(ch, bh, "helm"), helm_release)
+        app_status = release_status(release_changed(cc, bb, "app_config"), app_release)
+        nav.append(nav_item(cid, module, combined_release_status(helm_status, app_status)))
         sections = [
-            ("RELEASE-DIFF · Helm", version_bar(ch, bh) + resource_release_matrix(ch, bh, "Workload (kind / metadata.name)"), helm_changed),
-            ("RELEASE-DIFF · App Config", version_bar(cc, bb) + app_release_config_tabs(cc, bb), app_changed),
+            ("RELEASE-DIFF · Helm", version_bar(ch, bh) + helm_release, helm_status),
+            ("RELEASE-DIFF · App Config", version_bar(cc, bb) + app_release, app_status),
             ("ENV-DIFF · Helm", version_bar(ch, bh) + env_matrix(ch, "helm", "Workload / resource")),
             ("ENV-DIFF · App Config", version_bar(cc, bb) + app_env_config_tabs(cc)),
         ]
@@ -1036,10 +1275,11 @@ def build(input_dir: Path):
         cn = [x for x in current["ns"] if ("ms" in x["env"].lower()) == airflow]
         bn = [x for x in baseline["ns"] if ("ms" in x["env"].lower()) == airflow]
         cid = "airflow-ns" if airflow else "service-ns"
-        ns_changed = release_changed(cn, bn, "ns")
-        nav.append(nav_item(cid, label, ns_changed))
+        ns_release = resource_release_matrix(cn, bn, "GitOps workload (kind / metadata.name)", raw_env_headers=True)
+        ns_status = release_status(release_changed(cn, bn, "ns"), ns_release)
+        nav.append(nav_item(cid, label, ns_status))
         cards.append(f'<section id="{cid}"><h2>{label}</h2>{version_bar(cn, bn)}'
-                     f'{tabs([("RELEASE-DIFF", resource_release_matrix(cn, bn, "GitOps workload (kind / metadata.name)", raw_env_headers=True), ns_changed), ("ENV-DIFF", env_matrix(cn, "ns", "Namespace resource"))])}</section>')
+                     f'{tabs([("RELEASE-DIFF", ns_release, ns_status), ("ENV-DIFF", env_matrix(cn, "ns", "Namespace resource"))])}</section>')
 
     data = {"nav": "".join(nav), "content": "".join(cards)}
     return TEMPLATE.replace("__NAV__", data["nav"]).replace("__CONTENT__", data["content"])
@@ -1052,12 +1292,12 @@ TEMPLATE = """<!doctype html>
 *{box-sizing:border-box}html,body{height:100%;overflow:hidden}body{margin:0;background:var(--bg);color:var(--text);font:13px Inter,Segoe UI,sans-serif}
 header{position:fixed;inset:0 0 auto 0;height:56px;z-index:5;background:#fffffff2;border-bottom:1px solid var(--line);padding:14px 18px;box-shadow:0 2px 10px #25385810}
 h1{margin:0;font-size:18px}aside{position:fixed;top:56px;bottom:0;width:210px;padding:14px;border-right:1px solid var(--line);background:#fff;overflow:auto}
-aside a{display:flex;align-items:center;justify-content:space-between;gap:7px;color:var(--muted);padding:8px 9px;border-radius:6px;text-decoration:none;border-left:3px solid transparent;font-size:12px}aside a:hover{background:#eaf3fb;color:#174a68}aside a.active{background:#dceef7;color:#0b5f7b;border-left-color:#087f8c;font-weight:700}.diff-badge{flex:none;padding:2px 5px;border-radius:9px;font-size:8px;font-weight:800;letter-spacing:.03em}.diff-badge.has-diff{color:#a62239;background:#ffe1e6}.diff-badge.no-diff{color:#17633d;background:#dcf5e6}
+aside a{display:flex;align-items:center;justify-content:space-between;gap:7px;color:var(--muted);padding:8px 9px;border-radius:6px;text-decoration:none;border-left:3px solid transparent;font-size:12px}aside a:hover{background:#eaf3fb;color:#174a68}aside a.active{background:#dceef7;color:#0b5f7b;border-left-color:#087f8c;font-weight:700}.diff-badge{flex:none;padding:2px 5px;border-radius:9px;font-size:8px;font-weight:800;letter-spacing:.03em}.diff-badge.has-diff{color:#a62239;background:#ffe1e6}.diff-badge.expected-diff{color:#086b9c;background:#d9effa}.diff-badge.no-diff{color:#17633d;background:#dcf5e6}
 .nav-heading{margin:14px 6px 6px;padding-bottom:6px;border-bottom:1px solid #dce5ef;color:#32445d;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.nav-heading:first-child{margin-top:0}
 main{position:fixed;top:56px;right:0;bottom:0;left:210px;padding:14px;overflow:hidden}main>section{display:none;height:100%;min-height:0;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}main>section.active-view{display:flex;flex-direction:column}
 h2{flex:none;font-size:15px;margin:0;padding:12px 14px;border-bottom:1px solid var(--line)}
 .tab-group{display:flex;flex:1;min-height:0;flex-direction:column}.tabs{display:flex;flex:none;gap:3px;padding:7px 9px 0;overflow-x:auto}.tab{border:1px solid #dce5ef;border-bottom:0;background:#edf2f8;color:var(--muted);padding:7px 9px;border-radius:6px 6px 0 0;cursor:pointer;white-space:nowrap;font-size:11px}.tab.active{background:#fff;color:#174a68;border-top:2px solid var(--cyan)}
-.tab-diff-badge{display:inline-block;margin-left:6px;padding:1px 4px;border-radius:8px;font-size:8px;font-weight:800}.tab-diff-badge.has-diff{color:#a62239;background:#ffe1e6}.tab-diff-badge.no-diff{color:#17633d;background:#dcf5e6}
+.tab-diff-badge{display:inline-block;margin-left:6px;padding:1px 4px;border-radius:8px;font-size:8px;font-weight:800}.tab-diff-badge.has-diff{color:#a62239;background:#ffe1e6}.tab-diff-badge.expected-diff{color:#086b9c;background:#d9effa}.tab-diff-badge.no-diff{color:#17633d;background:#dcf5e6}
 .tab-pane{display:none;padding:8px}.tab-pane.active{display:flex;flex:1;min-height:0;flex-direction:column;overflow:hidden}.toolbar{flex:none;padding:5px;color:var(--muted)}.table-wrap{flex:1;min-height:0;overflow:auto;max-height:none;border:1px solid var(--line);border-radius:7px}
 .config-tabs{border:1px solid #dce5ef;border-radius:8px;background:#f8fafc}.config-tabs>.tabs{padding-top:8px}.config-tabs>.tabs>.tab{font-family:Consolas,monospace;padding:8px 11px}.config-tabs>.tab-pane{padding:8px}
 table{border-collapse:separate;border-spacing:0;min-width:100%;table-layout:fixed}th,td{border-right:1px solid var(--line);border-bottom:1px solid var(--line);vertical-align:top}
@@ -1072,7 +1312,7 @@ th small{display:block;color:var(--yellow);margin-top:5px;font-weight:400}td{bac
 .release td pre{margin:4px 6px;padding:6px 8px;font-size:11px;line-height:1.28}.release .add,.release .del,.release .hunk,.release .diff-file,.release .ctx{display:inline;margin:0;padding:0;line-height:1.28}
 .release-toolbar{display:flex;align-items:center;gap:10px}.release-toolbar span{font-size:12px}.release-view-toggle{border:1px solid #2c7699;background:#edf7fb;color:#1d607f;border-radius:6px;padding:7px 11px;cursor:pointer}.release-view-toggle:hover{background:#dceff7}.hidden{display:none!important}
 .workload-title{font-weight:700}.workload-status{margin:6px 7px 0;padding:4px 8px;font-size:11px;font-weight:700;border-left:3px solid}.added-status{color:#08733f;border-color:#08733f}.removed-status{color:#c12640;border-color:#c12640}.absent-workload{min-height:36px;background:#fafbfd}
-.diff-fragment{display:inline-block!important;width:100%;border-radius:2px}.diff-fragment.diff-all-namespaces{background:#e4f6ea}.diff-fragment.diff-expected-env{background:transparent}.diff-fragment.diff-actual{background:#ffe7eb}.expected-common{background:#e4f6ea}.expected-env-token{background:#bfe3f7;border-radius:2px;font-weight:800}.diff-legend{display:flex;flex:none;gap:7px;padding:4px 7px;font-size:9px;color:#52637b}.diff-legend span{padding:2px 6px;border-radius:8px}.legend-all{background:#dff3e6}.legend-env{background:#bfe3f7;color:#086b9c}.legend-actual{background:#ffe0e5}
+.diff-fragment{display:inline-grid!important;vertical-align:top;grid-template-columns:12px minmax(0,1fr);width:100%;background:transparent!important}.diff-marker{grid-column:1;text-align:center;font-weight:800;border-radius:2px 0 0 2px}.diff-yaml{grid-column:2;white-space:pre-wrap;min-width:0;border-radius:0 2px 2px 0}.diff-compact .ctx,.diff-full .ctx{display:inline;padding-left:12px}.diff-fragment.diff-all-namespaces>.diff-marker,.diff-fragment.diff-all-namespaces>.diff-yaml{background:#e4f6ea}.diff-fragment.diff-expected-env>.diff-marker{background:#e4f6ea}.diff-fragment.diff-expected-env>.diff-yaml{background:transparent}.diff-fragment.diff-actual>.diff-marker,.diff-fragment.diff-actual>.diff-yaml{background:#ffe7eb}.expected-common{background:#e4f6ea}.expected-env-token{background:#bfe3f7;border-radius:2px;font-weight:800}.diff-legend{display:flex;flex:none;gap:7px;padding:4px 7px;font-size:9px;color:#52637b}.diff-legend span{padding:2px 6px;border-radius:8px}.legend-all{background:#dff3e6}.legend-env{background:#bfe3f7;color:#086b9c}.legend-actual{background:#ffe0e5}
 .collapse-box{position:relative}.collapsible-content{max-height:280px;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable}.field-collapse .collapsible-content{max-height:92px;white-space:pre-wrap}.collapsible-content::-webkit-scrollbar{width:7px}.collapsible-content::-webkit-scrollbar-thumb{background:#b8c8d5;border-radius:6px}.collapsible-content::-webkit-scrollbar-track{background:#edf2f6}
 .release-version-bar{display:flex;flex:none;align-items:center;gap:10px;padding:7px 12px;background:#f7fafc;border-bottom:1px solid var(--line)}.release-version-bar>div:not(.version-arrow){display:flex;align-items:center;gap:6px}.release-version-bar span{color:var(--muted);font-size:10px}.release-version-bar b{color:#174f6b;font:600 11px Consolas,monospace}.version-arrow{color:#6f8198;font-size:14px}
 .only-differences .same-row{display:none}@media(max-width:800px){aside{display:none}main{top:56px;right:0;bottom:0;left:0;margin:0;padding:8px}}
