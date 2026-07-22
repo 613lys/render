@@ -965,14 +965,14 @@ def flatten_app_env(value, prefix=""):
             identities = [list_item_identity(item) for item in value]
             use_identities = (all(identity is not None for identity in identities)
                               and len(set(identities)) == len(identities))
-            for index, child in enumerate(value):
-                if use_identities:
+            if not use_identities:
+                out[prefix] = value
+            else:
+                for index, child in enumerate(value):
                     identity_path, identity_value = identities[index]
                     token = ".".join(identity_path) + "=" + identity_value
                     child_path = f"{prefix}[{token}]"
-                else:
-                    child_path = f"{prefix}[{index}]"
-                out.update(flatten_app_env(child, child_path))
+                    out.update(flatten_app_env(child, child_path))
     else:
         out[prefix] = value
     return out

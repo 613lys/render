@@ -101,6 +101,17 @@ def app_config(env: str, db: str, pool: int, kafka: str, timeout: int,
     review_threshold = 10 if baseline else {"dev": 12, "qa": 15, "prod": 20}.get(env, 12)
     notification_channels = ["email", "sms"] + (["pager"] if env == "prod" else [])
     channels_yaml = "\n".join(f"    - {channel}" for channel in notification_channels)
+    clients = [
+        (f"acl-{env}-reader", "group", "VIEWER"),
+        (f"acl-{env}-writer", "group", "EDITOR"),
+    ] + ([(f"acl-{env}-ops", "user", "ADMIN")] if env == "prod" else [])
+    clients_yaml = "\n".join(
+        f"    - username: {username}\n"
+        f"      type: {client_type}\n"
+        f"      authorities:\n"
+        f"        - {authority}"
+        for username, client_type, authority in clients
+    )
     return f"""
 spring:
   application:
@@ -127,6 +138,9 @@ custom-unmapped:
 notifications:
   channels:
 {channels_yaml}
+application:
+  clients:
+{clients_yaml}
 release-demo:
   shared-mode: {shared_mode}
   environment-alias: {environment_alias}

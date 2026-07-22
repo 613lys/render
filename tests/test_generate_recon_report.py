@@ -29,6 +29,15 @@ class ReconciliationReportTests(unittest.TestCase):
         self.assertIn("targets[name=backup].url", flattened)
         self.assertNotIn("targets[0].url", flattened)
 
+    def test_app_env_unidentified_object_list_stays_as_one_field(self):
+        clients = [
+            {"username": "client-a", "type": "group", "authorities": ["VIEWER"]},
+            {"username": "client-b", "type": "user", "authorities": ["EDITOR"]},
+        ]
+        flattened = report.flatten_app_env({"application": {"clients": clients}})
+        self.assertEqual(flattened, {"application.clients": clients})
+        self.assertNotIn("application.clients[0].username", flattened)
+
     def test_changed_multiline_list_item_keeps_block_scalar_marker(self):
         old = """spec:
   command:
