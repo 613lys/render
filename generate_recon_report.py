@@ -983,8 +983,8 @@ def flatten_app_env(value, prefix=""):
     return out
 
 
-def app_semantic_matrix(items, title):
-    envs = sorted({x["env"] for x in items}, key=env_sort)
+def app_semantic_matrix(items, title, all_envs=None):
+    envs = sorted(set(all_envs or {x["env"] for x in items}), key=env_sort)
     parsed = {}
     for item in items:
         docs = yaml_docs(item["text"])
@@ -994,9 +994,10 @@ def app_semantic_matrix(items, title):
                    key=lambda p: (category(p), p))
     head = []
     for env in envs:
-        item = parsed[env][0]
+        item = parsed.get(env, (None,))[0]
+        file_name = filename_without_version(item) if item else "MISSING CONFIG FILE"
         head.append(f'<th data-env="{html.escape(env, quote=True)}"><b>{html.escape(env)}</b>'
-                    f'<small class="file-head">{html.escape(filename_without_version(item))}</small></th>')
+                    f'<small class="file-head">{html.escape(file_name)}</small></th>')
     rows, current_category = [], None
     for path in paths:
         group = category(path)
@@ -1004,12 +1005,13 @@ def app_semantic_matrix(items, title):
             rows.append(f'<tr class="category-row"><th colspan="{len(envs)+1}">{html.escape(group)}</th></tr>')
             current_category = group
         marker = object()
-        values = [parsed[e][2].get(path, marker) for e in envs]
+        values = [parsed[e][2].get(path, marker) if e in parsed else marker for e in envs]
         changed = any(v != values[0] for v in values[1:])
         cells = []
         for env, value in zip(envs, values):
             if value is marker:
-                body = '<span class="missing">MISSING</span>'
+                missing_label = "MISSING" if env in parsed else "MISSING CONFIG FILE"
+                body = f'<span class="missing">{missing_label}</span>'
             else:
                 cls = "field-diff" if changed else "field-same"
                 raw_value = scalar_text(value)
@@ -1023,22 +1025,27 @@ def app_semantic_matrix(items, title):
         rows.append(f'<tr class="{"diff-row" if changed else "same-row"}" data-field-path="{html.escape(path, quote=True)}"><th class="field-path">{html.escape(path)}</th>{"".join(cells)}</tr>')
     raw_cells = []
     for env in envs:
-        item, value, _ = parsed[env]
-        raw_cells.append(f'<td data-env="{html.escape(env, quote=True)}"><details><summary>View original YAML</summary>'
-                         f'<div class="orig-file">{html.escape(item["path"].name)}</div>'
-                         f'<div class="collapse-box"><pre class="collapsible-content">{render_yaml(value, set())}</pre>'
-                         f'</div></details></td>')
+        if env not in parsed:
+            raw_cells.append(f'<td data-env="{html.escape(env, quote=True)}">'
+                             f'<div class="missing-file">MISSING CONFIG FILE</div></td>')
+        else:
+            item, value, _ = parsed[env]
+            raw_cells.append(f'<td data-env="{html.escape(env, quote=True)}"><details><summary>View original YAML</summary>'
+                             f'<div class="orig-file">{html.escape(item["path"].name)}</div>'
+                             f'<div class="collapse-box"><pre class="collapsible-content">{render_yaml(value, set())}</pre>'
+                             f'</div></details></td>')
     rows.append(f'<tr class="raw-yaml-row"><th class="field-path">Original YAML</th>{"".join(raw_cells)}</tr>')
     return (f'<div class="table-wrap">'
             f'<table class="matrix field-matrix env-matrix"><thead><tr><th>Resource</th>{"".join(head)}</tr></thead>'
             f'<tbody>{"".join(rows)}</tbody></table></div>')
 
 
-def app_env_config_tabs(items):
+def app_env_config_tabs(items, all_envs=None):
     grouped = defaultdict(list)
     for item in items:
         grouped[config_logical_key(item)].append(item)
-    sections = [(key, app_semantic_matrix(group, key)) for key, group in sorted(grouped.items())]
+    sections = [(key, app_semantic_matrix(group, key, all_envs=all_envs))
+                for key, group in sorted(grouped.items())]
     return tabs(sections, extra_class="config-tabs")
 
 
@@ -1391,11 +1398,13 @@ def build(input_dir: Path):
             app_release = app_release_config_tabs(cc, bb)
             app_status = release_status(release_changed(cc, bb, "app_config"), app_release)
             statuses.append(app_status)
+            module_envs = sorted({x["env"] for x in ch + bh + cc + bb}, key=env_sort)
             release_sections.append(
                 ("RELEASE-DIFF · App Config", version_bar(cc, bb) + app_release, app_status)
             )
             env_sections.append(
-                ("ENV-DIFF · App Config", version_bar(cc, bb) + app_env_config_tabs(cc))
+                ("ENV-DIFF · App Config", version_bar(cc, bb) +
+                 app_env_config_tabs(cc, all_envs=module_envs))
             )
         sections = release_sections + env_sections
         nav.append(nav_item(cid, module, combined_release_status(*statuses)))
@@ -1455,7 +1464,7 @@ table{border-collapse:separate;border-spacing:0;min-width:100%;table-layout:fixe
 thead th{position:sticky;top:0;background:#eaf1f8;z-index:3;padding:10px;min-width:350px}.matrix thead th:first-child,.row-title{min-width:190px;width:190px;position:sticky;left:0;z-index:2;background:#f1f5f9}
 th small{display:block;color:var(--yellow);margin-top:5px;font-weight:400}td{background:#fff}td pre{margin:4px 6px;padding:6px 8px;white-space:pre-wrap;word-break:break-word;font:11px/1.28 Consolas,"Cascadia Mono",monospace;background:#f8fafc;border:1px solid #e5ebf2;border-radius:6px;tab-size:2}
 .row-title{padding:9px;text-align:left;color:var(--cyan)}.yaml-diff{display:inline;color:#c12640;font-weight:700}.yaml-expected{display:inline;color:#086b9c;font-weight:700;background:#d9effa}.yaml-same{display:inline;color:#34445d}
-.missing{color:var(--red);font-weight:bold}.category{display:inline-block;color:#08111f;background:#87c7ff;border-radius:3px;padding:0 4px;font:10px Segoe UI,sans-serif}
+.missing{color:var(--red);font-weight:bold}.missing-file{margin:7px;padding:8px;border-left:3px solid var(--red);background:#fff1f3;color:var(--red);font-size:11px;font-weight:800}.category{display:inline-block;color:#08111f;background:#87c7ff;border-radius:3px;padding:0 4px;font:10px Segoe UI,sans-serif}
 .config-definition{margin-top:10px;padding-top:8px;border-top:1px solid #d6e0eb;color:#52637b;font-size:11px}.config-definition b{display:block;margin-bottom:5px}.row-category{display:inline-block;margin:2px 3px 2px 0;padding:2px 5px;border-radius:10px;background:#dceef5;color:#24566b;font-weight:500}
 .field-matrix .field-path{position:sticky;left:0;z-index:2;background:#f6f9fc;padding:7px 9px;text-align:left;color:#35546d;font:11px/1.28 Consolas,monospace}.field-value{padding:7px 9px;font:11px/1.28 Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.field-diff{color:#c12640;font-weight:700}.field-expected{display:inline-block;width:100%;color:#086b9c;font-weight:700;background:#d9effa}.field-same{color:#34445d}.category-row th{position:sticky;left:0;background:#dfeef5;color:#175c73;text-align:left;padding:7px 10px;font-size:11px;letter-spacing:.02em}.file-head{color:#526d83!important;overflow-wrap:anywhere}.raw-yaml-row details{margin:6px}.raw-yaml-row summary{cursor:pointer;color:#176a8d;font-weight:600;padding:5px}.raw-yaml-row pre{max-height:420px;overflow:auto}
 .env-matrix td pre{margin:4px 6px;padding:6px 8px;font-size:11px;line-height:1.28}.env-matrix .row-title{padding:6px 8px}.field-matrix .field-path{padding:4px 7px;line-height:1.28}.field-matrix .field-value{padding:4px 7px;line-height:1.28}.field-matrix .category-row th{padding:4px 8px;font-size:11px}.field-matrix details{margin:3px}.field-matrix details summary{padding:3px}

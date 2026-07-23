@@ -7,6 +7,19 @@ import generate_recon_report as report
 
 
 class ReconciliationReportTests(unittest.TestCase):
+    def test_app_env_missing_config_file_keeps_namespace_column(self):
+        item = {
+            "env": "cshg-qa",
+            "path": Path("application-qa__1.0.yaml"),
+            "text": "server:\n  port: 8080\n",
+        }
+        rendered = report.app_semantic_matrix(
+            [item], "application.yaml", all_envs=["cshg-dev", "cshg-qa"]
+        )
+        self.assertIn('data-env="cshg-dev"', rendered)
+        self.assertIn("MISSING CONFIG FILE", rendered)
+        self.assertIn('data-env="cshg-qa"', rendered)
+
     def test_env_diff_lines_include_python_normalized_metadata(self):
         rendered = report.render_yaml(
             {"endpoint": "service-dev"}, {"endpoint"}

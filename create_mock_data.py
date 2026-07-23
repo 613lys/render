@@ -583,8 +583,11 @@ def main() -> None:
                   baseline_app)
             current_routes = module_routing(module, env)
             baseline_routes = current_routes if module == "notification" else module_routing(module, env, baseline=True)
-            write(f"current/app_config/{label}/{module}/routing/{routes_name}__{app_current_version}.yaml",
-                  current_routes)
+            # Inventory Shanghai QA deliberately lacks the whole current routes
+            # file so ENV-DIFF can display MISSING CONFIG FILE explicitly.
+            if not (module == "inventory" and label == "cshg-qa"):
+                write(f"current/app_config/{label}/{module}/routing/{routes_name}__{app_current_version}.yaml",
+                      current_routes)
             write(f"baseline/app_config/{label}/{module}/routing/{routes_name}__{app_baseline_version}.yaml",
                   baseline_routes)
 
