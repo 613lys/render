@@ -7,6 +7,21 @@ import generate_recon_report as report
 
 
 class ReconciliationReportTests(unittest.TestCase):
+    def test_app_release_missing_namespace_is_explicitly_rendered(self):
+        item = {
+            "env": "cshg-qa",
+            "path": Path("application-qa__1.0.yaml"),
+            "name": "application-qa",
+            "config_dir": "spring-config",
+            "text": "server:\n  port: 8080\n",
+        }
+        rendered = report.app_release_config_tabs(
+            [item], [item], all_envs=["cshg-dev", "cshg-qa"]
+        )
+        self.assertIn('class="missing-comparison" data-env="cshg-dev"', rendered)
+        self.assertIn("MISSING CONFIG FILE", rendered)
+        self.assertIn('data-env="cshg-qa"', rendered)
+
     def test_app_env_missing_config_file_keeps_namespace_column(self):
         item = {
             "env": "cshg-qa",

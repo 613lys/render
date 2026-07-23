@@ -1049,7 +1049,7 @@ def app_env_config_tabs(items, all_envs=None):
     return tabs(sections, extra_class="config-tabs")
 
 
-def app_release_config_tabs(current, baseline):
+def app_release_config_tabs(current, baseline, all_envs=None):
     grouped_current, grouped_baseline = defaultdict(list), defaultdict(list)
     for item in current:
         grouped_current[config_logical_key(item)].append(item)
@@ -1058,7 +1058,7 @@ def app_release_config_tabs(current, baseline):
     keys = sorted(set(grouped_current) | set(grouped_baseline))
     sections = [(key, release_matrix(grouped_current.get(key, []),
                                      grouped_baseline.get(key, []), key,
-                                     kind="app_config"))
+                                     kind="app_config", all_envs=all_envs))
                 for key in keys]
     return tabs(sections, extra_class="config-tabs")
 
@@ -1153,8 +1153,8 @@ def unified(old, new, old_name, new_name, show_all=False):
     return "<br>".join(out) or '<span class="yaml-same">No release changes</span>'
 
 
-def release_matrix(current, baseline, title, kind="generic"):
-    envs = sorted({x["env"] for x in current + baseline}, key=env_sort)
+def release_matrix(current, baseline, title, kind="generic", all_envs=None):
+    envs = sorted(set(all_envs or {x["env"] for x in current + baseline}), key=env_sort)
     def group(items):
         out = defaultdict(list)
         for x in items:
@@ -1173,7 +1173,7 @@ def release_matrix(current, baseline, title, kind="generic"):
         for env in envs:
             item = next((x for x in current if x["env"] == env), None)
             item = item or next((x for x in baseline if x["env"] == env), None)
-            file_name = filename_without_version(item) if item else "missing"
+            file_name = filename_without_version(item) if item else "MISSING CONFIG FILE"
             head_cells.append(f'<th data-env="{html.escape(env, quote=True)}"><b>{html.escape(env)}</b>'
                               f'<small class="file-head">{html.escape(file_name)}</small></th>')
         head = "".join(head_cells)
@@ -1200,6 +1200,12 @@ def release_matrix(current, baseline, title, kind="generic"):
             b = bg.get((env, logical), [])
             cur = c[0] if c else None
             base = b[0] if b else None
+            if kind == "app_config" and cur is None and base is None:
+                cells.append(
+                    f'<td class="missing-comparison" data-env="{html.escape(env, quote=True)}">'
+                    f'<div class="missing-file">MISSING CONFIG FILE</div></td>'
+                )
+                continue
             old_text, new_text = base["text"] if base else "", cur["text"] if cur else ""
             old_compare, new_compare, old_full, new_full = hierarchical_diff_texts(old_text, new_text)
             old_name = f'baseline/{base["path"].name if base else "missing"}'
@@ -1395,10 +1401,10 @@ def build(input_dir: Path):
                 ("ENV-DIFF · Helm", version_bar(ch, bh) + env_matrix(ch, "helm", "Workload / resource"))
             )
         if cc or bb:
-            app_release = app_release_config_tabs(cc, bb)
+            module_envs = sorted({x["env"] for x in ch + bh + cc + bb}, key=env_sort)
+            app_release = app_release_config_tabs(cc, bb, all_envs=module_envs)
             app_status = release_status(release_changed(cc, bb, "app_config"), app_release)
             statuses.append(app_status)
-            module_envs = sorted({x["env"] for x in ch + bh + cc + bb}, key=env_sort)
             release_sections.append(
                 ("RELEASE-DIFF · App Config", version_bar(cc, bb) + app_release, app_status)
             )
@@ -1523,7 +1529,7 @@ function reclassifyReleaseTable(table,selected){
  const rows=[...table.tBodies].flatMap(body=>[...body.rows]);
  rows.forEach(row=>{
    const cells=[...row.querySelectorAll(':scope > td[data-env]')]
-     .filter(cell=>selected.has(cell.dataset.env));
+     .filter(cell=>selected.has(cell.dataset.env)&&!cell.classList.contains('missing-comparison'));
    const paths=new Set(cells.flatMap(cell=>
      [...cell.querySelectorAll('.diff-compact .diff-fragment[data-diff-path]')]
        .map(fragment=>fragment.dataset.diffKey)));

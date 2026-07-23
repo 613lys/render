@@ -583,13 +583,14 @@ def main() -> None:
                   baseline_app)
             current_routes = module_routing(module, env)
             baseline_routes = current_routes if module == "notification" else module_routing(module, env, baseline=True)
-            # Inventory Shanghai QA deliberately lacks the whole current routes
-            # file so ENV-DIFF can display MISSING CONFIG FILE explicitly.
-            if not (module == "inventory" and label == "cshg-qa"):
+            # Inventory Shanghai QA deliberately lacks the routes file in both
+            # snapshots so ENV-DIFF and RELEASE-DIFF show the namespace gap.
+            missing_routes = module == "inventory" and label == "cshg-qa"
+            if not missing_routes:
                 write(f"current/app_config/{label}/{module}/routing/{routes_name}__{app_current_version}.yaml",
                       current_routes)
-            write(f"baseline/app_config/{label}/{module}/routing/{routes_name}__{app_baseline_version}.yaml",
-                  baseline_routes)
+                write(f"baseline/app_config/{label}/{module}/routing/{routes_name}__{app_baseline_version}.yaml",
+                      baseline_routes)
 
     # A Helm-only application proves the report does not require App Config
     # files in order to expose a module and its two Helm comparison tabs.
