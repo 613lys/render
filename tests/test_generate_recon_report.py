@@ -7,6 +7,13 @@ import generate_recon_report as report
 
 
 class ReconciliationReportTests(unittest.TestCase):
+    def test_env_diff_lines_include_python_normalized_metadata(self):
+        rendered = report.render_yaml(
+            {"endpoint": "service-dev"}, {"endpoint"}
+        )
+        self.assertIn('data-env-normalized="endpoint: service"', rendered)
+        self.assertIn('data-env-derived="true"', rendered)
+
     def test_app_env_scalar_list_stays_as_one_field(self):
         value = {
             "security": {"allowed-origins": ["service-a", "service-b"]},
@@ -176,9 +183,10 @@ data:
         rendered = report.render_yaml(values["cshg-qa"], changed)
         self.assertIn("spec.ports[0].containerPort", changed)
         self.assertIn(
-            '<span class="yaml-diff" data-yaml-path="spec.ports[0].containerPort">    - containerPort: 8081</span>',
+            'data-yaml-path="spec.ports[0].containerPort"',
             rendered,
         )
+        self.assertIn('>    - containerPort: 8081</span>', rendered)
 
     def test_resource_key_uses_normalized_metadata_name(self):
         document = {

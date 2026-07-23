@@ -887,7 +887,12 @@ def render_yaml(value, changed, categories=False):
 
     def add(line, path, include_children=False):
         cls = "yaml-diff" if is_changed(path, include_children) else "yaml-same"
-        rows.append(f'<span class="{cls}" data-yaml-path="{html.escape(path, quote=True)}">{html.escape(line)}</span>')
+        normalized = environment_logical_value(line)
+        rows.append(
+            f'<span class="{cls}" data-yaml-path="{html.escape(path, quote=True)}"'
+            f' data-env-normalized="{html.escape(normalized, quote=True)}"'
+            f' data-env-derived="{str(line != normalized).lower()}">{html.escape(line)}</span>'
+        )
 
     def walk(node, path="", indent=0):
         pad = " " * indent
@@ -1007,7 +1012,12 @@ def app_semantic_matrix(items, title):
                 body = '<span class="missing">MISSING</span>'
             else:
                 cls = "field-diff" if changed else "field-same"
-                body = f'<span class="{cls}">{html.escape(scalar_text(value))}</span>'
+                raw_value = scalar_text(value)
+                normalized_value = environment_logical_value(raw_value)
+                body = (f'<span class="{cls}"'
+                        f' data-env-normalized="{html.escape(normalized_value, quote=True)}"'
+                        f' data-env-derived="{str(raw_value != normalized_value).lower()}">'
+                        f'{html.escape(raw_value)}</span>')
             cells.append(f'<td class="field-value" data-env="{html.escape(env, quote=True)}"><div class="collapse-box field-collapse">'
                          f'<div class="collapsible-content">{body}</div></div></td>')
         rows.append(f'<tr class="{"diff-row" if changed else "same-row"}" data-field-path="{html.escape(path, quote=True)}"><th class="field-path">{html.escape(path)}</th>{"".join(cells)}</tr>')
@@ -1444,10 +1454,10 @@ h2{flex:none;font-size:15px;margin:0;padding:12px 14px;border-bottom:1px solid v
 table{border-collapse:separate;border-spacing:0;min-width:100%;table-layout:fixed}th,td{border-right:1px solid var(--line);border-bottom:1px solid var(--line);vertical-align:top}
 thead th{position:sticky;top:0;background:#eaf1f8;z-index:3;padding:10px;min-width:350px}.matrix thead th:first-child,.row-title{min-width:190px;width:190px;position:sticky;left:0;z-index:2;background:#f1f5f9}
 th small{display:block;color:var(--yellow);margin-top:5px;font-weight:400}td{background:#fff}td pre{margin:4px 6px;padding:6px 8px;white-space:pre-wrap;word-break:break-word;font:11px/1.28 Consolas,"Cascadia Mono",monospace;background:#f8fafc;border:1px solid #e5ebf2;border-radius:6px;tab-size:2}
-.row-title{padding:9px;text-align:left;color:var(--cyan)}.yaml-diff{display:inline;color:#c12640;font-weight:700}.yaml-same{display:inline;color:#34445d}
+.row-title{padding:9px;text-align:left;color:var(--cyan)}.yaml-diff{display:inline;color:#c12640;font-weight:700}.yaml-expected{display:inline;color:#086b9c;font-weight:700;background:#d9effa}.yaml-same{display:inline;color:#34445d}
 .missing{color:var(--red);font-weight:bold}.category{display:inline-block;color:#08111f;background:#87c7ff;border-radius:3px;padding:0 4px;font:10px Segoe UI,sans-serif}
 .config-definition{margin-top:10px;padding-top:8px;border-top:1px solid #d6e0eb;color:#52637b;font-size:11px}.config-definition b{display:block;margin-bottom:5px}.row-category{display:inline-block;margin:2px 3px 2px 0;padding:2px 5px;border-radius:10px;background:#dceef5;color:#24566b;font-weight:500}
-.field-matrix .field-path{position:sticky;left:0;z-index:2;background:#f6f9fc;padding:7px 9px;text-align:left;color:#35546d;font:11px/1.28 Consolas,monospace}.field-value{padding:7px 9px;font:11px/1.28 Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.field-diff{color:#c12640;font-weight:700}.field-same{color:#34445d}.category-row th{position:sticky;left:0;background:#dfeef5;color:#175c73;text-align:left;padding:7px 10px;font-size:11px;letter-spacing:.02em}.file-head{color:#526d83!important;overflow-wrap:anywhere}.raw-yaml-row details{margin:6px}.raw-yaml-row summary{cursor:pointer;color:#176a8d;font-weight:600;padding:5px}.raw-yaml-row pre{max-height:420px;overflow:auto}
+.field-matrix .field-path{position:sticky;left:0;z-index:2;background:#f6f9fc;padding:7px 9px;text-align:left;color:#35546d;font:11px/1.28 Consolas,monospace}.field-value{padding:7px 9px;font:11px/1.28 Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.field-diff{color:#c12640;font-weight:700}.field-expected{display:inline-block;width:100%;color:#086b9c;font-weight:700;background:#d9effa}.field-same{color:#34445d}.category-row th{position:sticky;left:0;background:#dfeef5;color:#175c73;text-align:left;padding:7px 10px;font-size:11px;letter-spacing:.02em}.file-head{color:#526d83!important;overflow-wrap:anywhere}.raw-yaml-row details{margin:6px}.raw-yaml-row summary{cursor:pointer;color:#176a8d;font-weight:600;padding:5px}.raw-yaml-row pre{max-height:420px;overflow:auto}
 .env-matrix td pre{margin:4px 6px;padding:6px 8px;font-size:11px;line-height:1.28}.env-matrix .row-title{padding:6px 8px}.field-matrix .field-path{padding:4px 7px;line-height:1.28}.field-matrix .field-value{padding:4px 7px;line-height:1.28}.field-matrix .category-row th{padding:4px 8px;font-size:11px}.field-matrix details{margin:3px}.field-matrix details summary{padding:3px}
 .version{padding:6px 9px;background:#f4f0df;color:var(--yellow);font-size:12px}.orig-file{margin:6px 7px 0;padding:5px 8px;border-left:3px solid #4a90b8;background:#edf6fb;color:#28546d;font:12px/1.35 Consolas,monospace;overflow-wrap:anywhere}.add{display:block;color:#08733f;font-weight:600}.del{display:block;color:#c12640;font-weight:600}.hunk{display:block;color:#236a9d}.diff-file{display:block;color:var(--yellow)}.ctx{display:block;color:#40516b}
 .release td pre{margin:4px 6px;padding:6px 8px;font-size:11px;line-height:1.28}.release .add,.release .del,.release .hunk,.release .diff-file,.release .ctx{display:inline;margin:0;padding:0;line-height:1.28}
@@ -1564,11 +1574,16 @@ function refreshEnvironmentDiff(selected){
    table.querySelectorAll('tbody tr[data-field-path]').forEach(row=>{
      const cells=[...row.querySelectorAll(':scope > td[data-env]')]
        .filter(cell=>selected.has(cell.dataset.env));
+     const fieldValues=cells.map(cell=>cell.querySelector('.field-diff,.field-expected,.field-same'));
      const values=cells.map(cell=>cell.textContent.trim());
      const changed=values.length>1&&new Set(values).size>1;
+     const complete=fieldValues.length>0&&fieldValues.every(Boolean);
+     const normalized=complete&&new Set(fieldValues.map(value=>value.dataset.envNormalized)).size===1;
+     const expected=changed&&normalized&&fieldValues.some(value=>value.dataset.envDerived==='true');
      row.classList.toggle('diff-row',changed);row.classList.toggle('same-row',!changed);
-     cells.forEach(cell=>cell.querySelectorAll('.field-diff,.field-same').forEach(value=>{
-       value.classList.toggle('field-diff',changed);value.classList.toggle('field-same',!changed);
+     cells.forEach(cell=>cell.querySelectorAll('.field-diff,.field-expected,.field-same').forEach(value=>{
+       value.classList.remove('field-diff','field-expected','field-same');
+       value.classList.add(!changed?'field-same':(expected?'field-expected':'field-diff'));
      }));
    });
    table.querySelectorAll('tbody tr:not([data-field-path])').forEach(row=>{
@@ -1577,20 +1592,35 @@ function refreshEnvironmentDiff(selected){
      if(!row.querySelector('td[data-env]'))return;
      const paths=new Set(cells.flatMap(cell=>[...cell.querySelectorAll('[data-yaml-path]')]
        .map(line=>line.dataset.yamlPath)));
-     const directlyChanged=new Set();
+     const directClasses=new Map();
      paths.forEach(path=>{
-       const values=cells.map(cell=>[...cell.querySelectorAll('[data-yaml-path]')]
-         .filter(line=>line.dataset.yamlPath===path).map(line=>line.textContent).join('\\n')||'<missing>');
-       if(values.length>1&&new Set(values).size>1)directlyChanged.add(path);
+       const linesByCell=cells.map(cell=>[...cell.querySelectorAll('[data-yaml-path]')]
+         .filter(line=>line.dataset.yamlPath===path));
+       const values=linesByCell.map(lines=>lines.map(line=>line.textContent).join('\\n')||'<missing>');
+       if(values.length<2||new Set(values).size===1){directClasses.set(path,'same');return;}
+       const complete=linesByCell.every(lines=>lines.length>0);
+       const normalized=complete&&new Set(linesByCell.map(lines=>
+         lines.map(line=>line.dataset.envNormalized).join('\\n'))).size===1;
+       const hasEnv=linesByCell.some(lines=>lines.some(line=>line.dataset.envDerived==='true'));
+       directClasses.set(path,normalized&&hasEnv?'expected':'diff');
      });
-     const changedPaths=new Set([...paths].filter(path=>[...directlyChanged]
-       .some(changed=>changed===path||changed.startsWith(path+'.')||changed.startsWith(path+'['))));
-     cells.forEach(cell=>cell.querySelectorAll('[data-yaml-path]').forEach(line=>{
-       const changed=changedPaths.has(line.dataset.yamlPath);
-       line.classList.toggle('yaml-diff',changed);line.classList.toggle('yaml-same',!changed);
+     const pathClasses=new Map([...paths].map(path=>{
+       const descendants=[...directClasses].filter(([changed])=>
+         changed===path||changed.startsWith(path+'.')||changed.startsWith(path+'['))
+         .map(([,classification])=>classification);
+       const classification=descendants.includes('diff')?'diff':
+         (descendants.includes('expected')?'expected':'same');
+       return [path,classification];
      }));
-     row.classList.toggle('diff-row',changedPaths.size>0);
-     row.classList.toggle('same-row',changedPaths.size===0);
+     cells.forEach(cell=>cell.querySelectorAll('[data-yaml-path]').forEach(line=>{
+       const classification=pathClasses.get(line.dataset.yamlPath)||'same';
+       line.classList.remove('yaml-diff','yaml-expected','yaml-same');
+       line.classList.add(classification==='diff'?'yaml-diff':
+         (classification==='expected'?'yaml-expected':'yaml-same'));
+     }));
+     const changed=[...pathClasses.values()].some(value=>value!=='same');
+     row.classList.toggle('diff-row',changed);
+     row.classList.toggle('same-row',!changed);
    });
  });
 }
