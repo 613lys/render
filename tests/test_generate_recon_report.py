@@ -7,6 +7,45 @@ import generate_recon_report as report
 
 
 class ReconciliationReportTests(unittest.TestCase):
+    def test_app_config_prefixes_group_within_the_same_folder(self):
+        application_qa = {
+            "config_dir": "spring-config",
+            "name": "application-qa",
+            "path": Path("application-qa__1.0.yaml"),
+        }
+        application_custom = {
+            "config_dir": "spring-config",
+            "name": "application-cod-qq",
+            "path": Path("application-cod-qq__current-code.yaml"),
+        }
+        flow_qa = {
+            "config_dir": "spring-config",
+            "name": "flow-qa",
+            "path": Path("flow-qa__1.0.yaml"),
+        }
+        application_other_folder = {
+            "config_dir": "spring-batch-config",
+            "name": "application-cod-qq",
+            "path": Path("application-cod-qq__1.0.yaml"),
+        }
+
+        self.assertEqual(
+            report.config_logical_key(application_qa),
+            "spring-config/application.yaml",
+        )
+        self.assertEqual(
+            report.config_logical_key(application_custom),
+            "spring-config/application.yaml",
+        )
+        self.assertEqual(
+            report.config_logical_key(flow_qa),
+            "spring-config/flow.yaml",
+        )
+        self.assertEqual(
+            report.config_logical_key(application_other_folder),
+            "spring-batch-config/application.yaml",
+        )
+
     def test_app_release_missing_namespace_is_explicitly_rendered(self):
         item = {
             "env": "cshg-qa",

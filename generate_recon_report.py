@@ -941,8 +941,18 @@ def render_yaml(value, changed, categories=False):
     return "<br>".join(rows)
 
 
+def app_config_family(name):
+    """Collapse environment-specific App Config names into their file family."""
+    normalized = normalize_name(name)
+    for prefix in ("application", "flow"):
+        if normalized.lower().startswith(prefix):
+            return prefix
+    return normalized
+
+
 def config_logical_key(item):
-    return f'{item["config_dir"] or "root"}/{normalize_name(item["name"])}{item["path"].suffix}'
+    family = app_config_family(item["name"])
+    return f'{item["config_dir"] or "root"}/{family}{item["path"].suffix}'
 
 
 def scalar_text(value):
@@ -1095,7 +1105,7 @@ def env_matrix(items, kind, title):
     else:
         matrix = defaultdict(dict)
         for item in items:
-            key = f'{item["config_dir"] or "root"}/{normalize_name(item["name"])}'
+            key = f'{item["config_dir"] or "root"}/{app_config_family(item["name"])}'
             docs = yaml_docs(item["text"])
             matrix[key][item["env"]] = docs[0] if docs else {"raw": item["text"]}
             filenames[(key, item["env"])] = item["path"].name
